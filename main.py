@@ -1,0 +1,1780 @@
+import os
+import sys
+import shutil
+import subprocess
+import re
+import requests
+import concurrent.futures
+from pathlib import Path
+from datetime import datetime
+import secrets
+import random
+from collections import Counter, defaultdict
+try:
+    import tkinter as tk
+    from tkinter import filedialog
+except ModuleNotFoundError:
+    tk = None
+    filedialog = None
+import json
+from urllib.parse import quote
+try:
+    import PyPDF2  # type: ignore
+except ImportError:
+    PyPDF2 = None
+import threading
+import atexit
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from title import generate_title
+
+# ========================= CONFIGURATION =========================
+# --- API Keys ---
+IMGBB_API_KEY = "c68b06c4f7daabb90d696eafa1f25a5c"   # CHANGE THIS! GET Free API KEY at https://api.imgbb.com/
+FREEIMAGE_API_KEY = "6d207e02198a847aa98d0a2a901485a5"
+
+# --- Settings ---
+IMAGE_HOST = "imgbb"           # "imgbb", "freeimage"
+# Note: legacy "freehost" alias is deprecated; use "freeimage" instead.
+# Backward compatibility for deprecated alias.
+_DEPRECATED_HOST_ALIASES = {"freehost": "freeimage"}
+# imgbb → max file size 32 MB
+# freeimage → max file size 64 MB
+
+SCREENSHOT_COUNT = 6               # Number of screenshots to take
+# Default now keeps full-frame captures; set to True to restore auto-cropping of letter/pillarbox bars.
+CROP_BLACK_BARS = False
+LOSSLESS_SCREENSHOT = True         # If True, capture screenshots in lossless / max quality
+CROP_LUMINANCE_THRESHOLD = 24      # cropdetect limit: pixels brighter than this are considered content
+CROP_ROUNDING = 16                 # cropdetect round: align crop dimensions to this many pixels
+CROP_RESET_INTERVAL = 0            # cropdetect reset: 0 = never reset during single-frame analysis
+CREATE_TORRENT_FILE = True         # This creates the .torrent file
+SKIP_TXT = True                    # If True, the script will NOT save the description as a .txt file
+TRACKER_ANNOUNCE = "https://tracker.torrentbd.net/announce"
+PRIVATE_TORRENT = True
+COPY_TO_CLIPBOARD = True           # Copies description in your clipboard
+USE_WP_PROXY = False
+USE_GUI_FILE_PICKER = False        # If True, use the Windows file picker instead of the command line to select files
+
+# --- Upload concurrency (mainly for image uploads) ---
+MAX_CONCURRENT_UPLOADS = 16        # Hard cap to avoid overwhelming the host/API
+MIN_IO_WORKERS = 4                 # Baseline for network-bound uploads
+IO_WORKER_MULTIPLIER = 2           # Modest multiplier over CPU count for I/O tasks
+UPLOAD_TIMEOUT = 90                # Balanced timeout: allows slow hosts while still limiting stalls
+
+# --- AUTO DELETE SETTINGS ---
+# If True, deletes the generated .torrent (and .txt if created) when the script closes.
+# latest.json is ALWAYS deleted on exit/start regardless of this setting.
+AUTO_DELETE_CREATED_FILES = True
+
+# --- SERVER SETTINGS ---
+START_HTTP_SERVER = True               # True = Start local server for Tampermonkey sync
+HTTP_PORT = 8090                       # Port for the local server
+# ================================================================
+
+VIDEO_EXTS = {'.mkv', '.mp4', '.avi', '.mov', '.m4v', '.webm', '.flv', '.wmv', '.mpg', '.mpeg', '.ts', '.m2ts'}
+AUDIO_EXTS = {'.flac', '.mp3', '.m4a', '.aac', '.ogg', '.opus', '.wav', '.ape', '.wv', '.alac'}
+PDF_EXTS = {'.pdf'}
+AUDIO_TRACKLIST_SINGLES_SECTION = "Singles"
+AUDIO_NO_COVER_PLACEHOLDER = "No cover"
+SPECTROGRAM_TITLE_COLOR = "#cddc39"
+CATEGORY_BOOKS = "36"
+CATEGORY_PRO_WRESTLING = os.getenv("CATEGORY_PRO_WRESTLING", "6")
+WRESTLING_TERMS = (
+    r"AEW",
+    r"WWE",
+    r"WWF",
+    r"ROH",
+    r"NJPW",
+    r"TNA",
+    r"Impact",
+    r"Pro[\s-]?Wrestling",
+    r"Wrestlemania",
+    r"Royal\s+Rumble",
+    r"Smackdown",
+    r"RAW",
+    r"Dynamite",
+    r"Rampage",
+    r"Collision",
+    r"Full\s+Gear",
+    r"All\s+Out",
+    r"Forbidden\s+Door",
+)
+WRESTLING_REGEX = re.compile(r"\b(?:" + "|".join(WRESTLING_TERMS) + r")\b", re.I)
+# Identifies fansub episode-range packs, e.g. "01 ~ 10" or "01~10".
+_FANSUB_PACK_RANGE_RE = re.compile(r'\b\d{1,3}\s*~\s*\d{1,3}\b')
+
+LATEST_JSON = None
+GENERATED_TORRENT = None
+GENERATED_TXT = None
+GENERATED_SPECTROGRAM = None
+EXTRACTED_COVER = None
+GENERATED_PDF_IMAGES: list[Path] = []
+
+class c:
+    RESET   = '\033[0m'
+    BOLD    = '\033[1m'
+    DIM     = '\033[2m'
+    PURPLE  = '\033[95m'
+    CYAN    = '\033[96m'
+    GREEN   = '\033[92m'
+    YELLOW  = '\033[93m'
+    RED     = '\033[91m'
+    GRAY    = '\033[90m'
+    WHITE   = '\033[97m'
+
+class CORSRequestHandler(SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET')
+        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
+        return super(CORSRequestHandler, self).end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+def start_server_thread(directory, port):
+    def run():
+        try:
+            os.chdir(directory)
+            server_address = ('', port)
+            httpd = HTTPServer(server_address, CORSRequestHandler)
+            print(f"\n{c.GREEN}⚡ HTTP Server Running on http://localhost:{port}{c.RESET}")
+            print(f"{c.DIM}   Serving: {directory}{c.RESET}")
+            httpd.serve_forever()
+        except OSError:
+            print(f"\n{c.RED}Error: Port {port} is busy.{c.RESET}")
+        except Exception as e:
+            print(f"\n{c.RED}Server error: {e}{c.RESET}")
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+def cleanup_sync_files():
+    """Deletes sync files and optionally generated files on exit"""
+    try:
+
+        if LATEST_JSON and LATEST_JSON.exists():
+            LATEST_JSON.unlink()
+
+        if GENERATED_SPECTROGRAM and GENERATED_SPECTROGRAM.exists():
+            GENERATED_SPECTROGRAM.unlink()
+
+        if EXTRACTED_COVER and EXTRACTED_COVER.exists():
+            EXTRACTED_COVER.unlink()
+
+        if AUTO_DELETE_CREATED_FILES:
+            if GENERATED_TORRENT and GENERATED_TORRENT.exists():
+                GENERATED_TORRENT.unlink()
+                print(f"{c.YELLOW}Auto-deleted: {GENERATED_TORRENT.name}{c.RESET}")
+
+            if GENERATED_TXT and GENERATED_TXT.exists():
+                GENERATED_TXT.unlink()
+                print(f"{c.YELLOW}Auto-deleted: {GENERATED_TXT.name}{c.RESET}")
+        for img in GENERATED_PDF_IMAGES:
+            if img.exists():
+                img.unlink()
+    except OSError as exc:
+        error(f"Cleanup failed while removing generated files: {exc}")
+
+atexit.register(cleanup_sync_files)
+
+def clear(): os.system('cls' if os.name == 'nt' else 'clear')
+
+def banner():
+    clear()
+    print(f"""
+{c.PURPLE}{c.BOLD}
+╔══════════════════════════════════════════════════════════════════╗
+║                TorretBD Lazy Upload                              ║
+║    By fahimbyte (https://github.com/mazidulmahim)                ║
+╚══════════════════════════════════════════════════════════════════╝
+{c.RESET}""")
+
+def log(msg: str, icon: str = "•", color: str = c.CYAN):
+    t = datetime.now().strftime("%H:%M:%S")
+    print(f"{color}[{t}] {icon} {msg}{c.RESET}")
+
+def success(msg): log(msg, "Success", c.GREEN)
+def error(msg):   log(msg, "Error", c.RED)
+
+def hide_window():
+    if os.name == 'nt':
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = subprocess.SW_HIDE
+        return si
+    return None
+
+def copy_to_clipboard(text: str):
+    if not COPY_TO_CLIPBOARD: return
+    try:
+        if os.name == 'nt':
+            subprocess.run('clip', input=text.encode('utf-8'), check=True)
+        elif sys.platform == 'darwin':
+            subprocess.run('pbcopy', input=text.encode('utf-8'), check=True)
+        else:
+            subprocess.run(['xclip', '-selection', 'clipboard'], input=text.encode('utf-8'), check=True)
+        success("Description copied to clipboard!")
+    except:
+        pass
+
+def create_torrent(target: Path) -> bool:
+    global GENERATED_TORRENT
+    if not CREATE_TORRENT_FILE:
+        log("Skipping torrent creation (disabled)", "Skip")
+        return True
+    if not shutil.which("mkbrr"):
+        error("mkbrr not found! → https://github.com/autobrr/mkbrr")
+        return False
+
+    log("Creating torrent file...", "Torrent")
+    out = target.parent / f"{target.name}.torrent"
+    GENERATED_TORRENT = out
+
+    cmd = ["mkbrr", "create", "-t", TRACKER_ANNOUNCE,
+           f"--private={'true' if PRIVATE_TORRENT else 'false'}", "-o", str(out), str(target)]
+
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        bufsize=1, universal_newlines=True, startupinfo=hide_window()
+    )
+
+    while True:
+        line = process.stdout.readline()
+        if not line and process.poll() is not None: break
+        if line:
+            line = line.strip()
+            if "Hashing pieces" in line or "%" in line or "Wrote" in line:
+                print(f"\r{c.CYAN}{line}{c.RESET}", end="", flush=True)
+
+    print()
+    returncode = process.wait()
+
+    if returncode == 0 and out.exists():
+        success(f"Torrent created: {out.name}")
+        return True
+    else:
+        error("Torrent creation failed!")
+        return False
+
+def get_mediainfo(path: Path) -> str:
+    cmd = ["mediainfo", str(path)]
+    if not shutil.which("mediainfo"):
+        exe = Path(__file__).parent / "MediaInfo.exe"
+        if exe.exists(): cmd = [str(exe), str(path)]
+        else: return "MediaInfo not available"
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=hide_window(), timeout=120)
+        return result.stdout if result.returncode == 0 else "Failed"
+    except: return "Failed"
+
+def create_spectrogram(audio_file: Path) -> Path | None:
+    global GENERATED_SPECTROGRAM
+
+    audiowaveform_path = shutil.which("audiowaveform")
+    if audiowaveform_path:
+        log("Creating spectrogram with audiowaveform...", "Audio")
+        spec_output = Path("spectrogram.png")
+        GENERATED_SPECTROGRAM = spec_output
+
+        cmd = [audiowaveform_path, "-i", str(audio_file), "-o", str(spec_output), "--width", "1800", "--height", "512"]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hide_window(), timeout=120)
+            if spec_output.exists():
+                success(f"Spectrogram created: {spec_output.name}")
+                return spec_output
+            else:
+                error("Spectrogram creation failed!")
+                return None
+        except Exception as e:
+            error(f"Spectrogram creation failed: {e}")
+            return None
+
+    if not shutil.which("sox"):
+        error("sox not found! Install audiowaveform or sox: sudo apt-get install audiowaveform sox libsox-fmt-all")
+        return None
+
+    log("Creating spectrogram with SoX...", "Audio")
+    spec_output = Path("spectrogram.png")
+    GENERATED_SPECTROGRAM = spec_output
+
+    temp_wav = None
+    input_file = audio_file
+    if audio_file.suffix.lower() in ['.m4a', '.aac', '.mp4', '.opus', '.wma']:
+        if not shutil.which("ffmpeg"):
+            error("ffmpeg not found! Install it to process M4A/AAC/MP4/OPUS/WMA files")
+            return None
+
+        temp_wav = Path(f"temp_spectrogram_{audio_file.stem}.wav")
+        log(f"Converting {audio_file.suffix} to WAV for spectrogram...", "Audio")
+        try:
+            subprocess.run(
+                ["ffmpeg", "-i", str(audio_file), "-y", str(temp_wav)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                startupinfo=hide_window(), timeout=120
+            )
+            input_file = temp_wav
+        except Exception as e:
+            error(f"Audio conversion failed: {e}")
+            if temp_wav and temp_wav.exists():
+                temp_wav.unlink()
+            return None
+
+    cmd = ["sox", str(input_file), "-n", "spectrogram", "-o", str(spec_output)]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hide_window(), timeout=120)
+        if spec_output.exists():
+            success(f"Spectrogram created: {spec_output.name}")
+            return spec_output
+        else:
+            error("Spectrogram creation failed!")
+            return None
+    except Exception as e:
+        error(f"Spectrogram creation failed: {e}")
+        return None
+    finally:
+        if temp_wav and temp_wav.exists():
+            temp_wav.unlink()
+
+def extract_audio_metadata(audio_file: Path) -> dict:
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", str(audio_file)],
+            capture_output=True, text=True, startupinfo=hide_window(), timeout=30
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            tags = data.get("format", {}).get("tags", {})
+            artist = tags.get("artist") or tags.get("ARTIST") or tags.get("album_artist") or tags.get("ALBUM_ARTIST") or ""
+            album = tags.get("album") or tags.get("ALBUM") or ""
+
+            stream = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), {})
+            sample_rate = stream.get("sample_rate", "44100")
+            bit_rate = stream.get("bit_rate") or data.get("format", {}).get("bit_rate", "0")
+            bit_depth = stream.get("bits_per_sample") or stream.get("bits_per_raw_sample", "16")
+            file_extension = audio_file.suffix.lstrip('.')
+            codec = stream.get("codec_name", "unknown").upper()
+            if codec == "FLAC":
+                codec = "FLAC"
+
+            return {
+                "artist": artist,
+                "album": album,
+                "sample_rate": sample_rate,
+                "bit_rate": bit_rate,
+                "bit_depth": bit_depth,
+                "file_extension": file_extension,
+                "codec": codec
+            }
+    except:
+        pass
+    return {"artist": "", "album": "", "sample_rate": "44100", "bit_rate": "0", "bit_depth": "16", "file_extension": "flac", "codec": "FLAC"}
+
+def find_cover_image(folder: Path) -> Path | None:
+    cover_names = ['cover.jpg', 'cover.png', 'cover.jpeg', 'folder.jpg', 'folder.png', 'album.jpg', 'album.png']
+    for cover_name in cover_names:
+        cover_path = folder / cover_name
+        if cover_path.exists() and cover_path.is_file():
+            return cover_path
+
+    for file in folder.iterdir():
+        if file.is_file() and file.suffix.lower() in {'.jpg', '.jpeg', '.png'} and 'cover' in file.name.lower():
+            return file
+
+    return None
+
+_FAKINGTHEFUNK_NAMES = frozenset({"fakingthefunk.jpg", "fakingthefunk.png", "fakingthefunk.jpeg"})
+
+def find_fakingthefunk_image(search_root: Path) -> Path | None:
+    """Search *search_root* (recursively) for a fakingthefunk proof image.
+
+    Looks for a file named ``fakingthefunk.jpg``, ``fakingthefunk.png``, or
+    ``fakingthefunk.jpeg`` anywhere inside the folder tree.  This covers both
+    regular album folders and discography roots where the image may live inside
+    a sub-album directory.
+
+    Returns the path to the first match found, or ``None`` if absent.
+    """
+    if search_root.is_file():
+        return None
+    for candidate in search_root.rglob("*"):
+        if candidate.is_file() and candidate.name.lower() in _FAKINGTHEFUNK_NAMES:
+            return candidate
+    return None
+
+def extract_cover_from_audio(audio_files: list[Path], dest_dir: Path) -> Path | None:
+    """Try to extract embedded cover art from audio files using ffmpeg.
+
+    Iterates through audio_files in order and attempts to extract an attached
+    image stream from each file.  The extracted image is written to
+    dest_dir/extracted_cover.jpg.
+
+    Args:
+        audio_files: List of audio file paths to try, in priority order.
+        dest_dir:    Directory where the extracted cover will be saved.
+
+    Returns:
+        Path to the extracted cover image, or None if no embedded cover found.
+    """
+    if not shutil.which("ffmpeg"):
+        return None
+    out_path = dest_dir / "extracted_cover.jpg"
+    for audio_file in audio_files:
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-i", str(audio_file), "-an", "-vcodec", "copy", "-y", str(out_path)],
+                capture_output=True, timeout=30, startupinfo=hide_window()
+            )
+            if result.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+                return out_path
+            elif out_path.exists():
+                out_path.unlink()
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError):
+            if out_path.exists():
+                out_path.unlink()
+    return None
+
+def select_representative_audio_file(audio_files: list[Path], base_dir: Path | None = None) -> Path:
+    """Pick a representative audio file for metadata/spectrogram generation.
+
+    For nested audio folders (e.g., discography roots), prefer the top-level
+    release bucket with the most tracks instead of always taking the first file.
+    """
+    if not audio_files:
+        raise ValueError("audio_files cannot be empty")
+
+    if not base_dir:
+        return audio_files[0]
+
+    bucketed: dict[str, list[Path]] = defaultdict(list)
+    for audio_file in audio_files:
+        try:
+            rel = audio_file.relative_to(base_dir)
+        except ValueError:
+            rel = audio_file
+        bucket = "__root__" if len(rel.parts) == 1 else rel.parts[0].lower()
+        bucketed[bucket].append(audio_file)
+
+    if not bucketed:
+        return audio_files[0]
+
+    best_bucket, bucket_files = max(
+        bucketed.items(),
+        key=lambda item: (len(item[1]), item[0] != "__root__", item[0]),
+    )
+
+    if not bucket_files:
+        return audio_files[0]
+
+    # Prefer the most common extension within the selected bucket.
+    ext_counts = Counter(p.suffix.lower() for p in bucket_files)
+    if not ext_counts:
+        return sort_paths_by_mtime(bucket_files)[0]
+    preferred_ext, _ = max(ext_counts.items(), key=lambda item: (item[1], item[0]))
+    ext_files = [p for p in bucket_files if p.suffix.lower() == preferred_ext]
+    if not ext_files:
+        return sort_paths_by_mtime(bucket_files)[0]
+    return sort_paths_by_mtime(ext_files)[0]
+
+def generate_audio_tracklist(audio_files: list[Path], base_dir: Path | None = None) -> str:
+    if not audio_files:
+        return ""
+
+    if not base_dir:
+        return "\n".join(audio_file.name for audio_file in audio_files)
+
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for audio_file in audio_files:
+        try:
+            rel = audio_file.relative_to(base_dir)
+        except ValueError:
+            grouped[AUDIO_TRACKLIST_SINGLES_SECTION].append(audio_file.name)
+            continue
+
+        if len(rel.parts) == 1:
+            grouped[AUDIO_TRACKLIST_SINGLES_SECTION].append(rel.name)
+        else:
+            album = rel.parts[0]
+            track = str(Path(*rel.parts[1:]))
+            grouped[album].append(track)
+
+    output_lines: list[str] = []
+    section_names = sorted(grouped.keys(), key=lambda name: (name != AUDIO_TRACKLIST_SINGLES_SECTION, name.lower()))
+    for idx, section in enumerate(section_names):
+        output_lines.append(section)
+        output_lines.extend(f" - {track}" for track in grouped[section])
+        if idx < len(section_names) - 1:
+            output_lines.append("")
+    return "\n".join(output_lines)
+
+def select_audio_files_for_spectrograms(
+    audio_files: list[Path],
+    preferred_audio: Path | None = None,
+    fallback_count: int = 2,
+) -> list[Path]:
+    if not audio_files:
+        return []
+
+    target_count = 3 if len(audio_files) >= 3 else fallback_count
+    selected: list[Path] = []
+
+    if preferred_audio and preferred_audio in audio_files:
+        selected.append(preferred_audio)
+
+    for audio_file in audio_files:
+        if len(selected) >= target_count:
+            break
+        if audio_file not in selected:
+            selected.append(audio_file)
+
+    base_cycle = selected[:]
+
+    cycle_index = 0
+    while len(selected) < target_count:
+        selected.append(base_cycle[cycle_index % len(base_cycle)])
+        cycle_index += 1
+
+    return selected
+
+def escape_bbcode_text(value: str) -> str:
+    return value.replace("[", "&#91;").replace("]", "&#93;")
+
+def generate_audio_description(
+    folder_name: str,
+    cover_url: str,
+    mediainfo_text: str,
+    tracklist: str,
+    spectrogram_entries: list[tuple[str, str]],
+    fakingthefunk_url: str | None = None,
+) -> str:
+    if not spectrogram_entries:
+        raise ValueError("spectrogram_entries must not be empty")
+
+    proof_lines: list[str] = []
+    for spectrogram_title, spectrogram_url in spectrogram_entries:
+        escaped_title = escape_bbcode_text(spectrogram_title)
+        proof_lines.append(f"[center][size=3][color={SPECTROGRAM_TITLE_COLOR}]{escaped_title}[/color][/size][/center]")
+        proof_lines.append(f"[center][img]{spectrogram_url}[/img][/center]")
+
+    if fakingthefunk_url:
+        proof_lines.append(f"[center][size=3][color={SPECTROGRAM_TITLE_COLOR}]FakingTheFunk[/color][/size][/center]")
+        proof_lines.append(f"[center][img]{fakingthefunk_url}[/img][/center]")
+
+    proof_block = "\n".join(proof_lines)
+
+    description = f"""[font=Segoe UI][center][b][color=#FFD700][size=6]{folder_name}[/size][/color][/b][/center][/font]
+[center]{cover_url}[/center]
+[center][b][size=5][color=#59E817][font=Segoe UI]MediaInfo[/font][/color][/size][/b][/center][font=Courier New]
+[mediainfo]
+{mediainfo_text}
+[/mediainfo]
+[/font]
+[center][b][font=Segoe UI][color=#59E817][size=5]Tracklist[/size][/color][/font][/b][/center]
+[color=#C63968][b][center]{tracklist}[/center][/b][/color]
+[center][b][size=5][font=Tahoma][color=#59E817]Proof[/color][/size][/b][/center][/font]
+{proof_block}
+[hr][i][b][center][font=Segoe UI][size=4][color=#FFD700]If you're downloading my torrent and not getting the desired speed, just comment, and I'll move it to my seedbox.[/color][/size][/font][/center][/b][/i]"""
+    return description
+
+def generate_audio_title(folder_name: str, metadata: dict) -> str:
+    artist = metadata.get("artist", "")
+    sample_rate_hz = int(metadata.get("sample_rate", "44100"))
+    sample_rate_khz = sample_rate_hz // 1000
+    bit_depth = int(metadata.get("bit_depth", "16"))
+    file_extension = metadata.get("file_extension", "flac").upper()
+
+    bit_hz_str = f"[{bit_depth}bit-{sample_rate_khz}kHz]"
+    ext_str = f"[{file_extension}]"
+
+    # Check if folder_name contains [E] marker
+    has_e_marker = bool(re.search(r'\[E\]', folder_name))
+
+    # Remove [E] from folder_name to avoid duplication
+    folder_name_clean = re.sub(r'\s*\[E\]\s*', ' ', folder_name).strip()
+
+    # Only add [E] if the original folder name had it
+    e_marker = " [E]" if has_e_marker else ""
+
+    if artist:
+        title = f"{artist} - {folder_name_clean}{e_marker} {bit_hz_str} {ext_str}-fahimbyte"
+    else:
+        title = f"{folder_name_clean}{e_marker} {bit_hz_str} {ext_str}-fahimbyte"
+
+    return title
+
+# Detect Dolby Vision / HDR10 markers in filenames or mediainfo text.
+_DOLBY_VISION_PATTERN = r"dolby\s*vision|dvhe\.\d+"
+_DOVI_PATTERN = r"dovi(?:\b|[.\-_\s])"
+# dv requires delimiters to avoid false positives on tokens like "DVD"
+_DV_TOKEN_PATTERN = r"(?:^|[.\-_\s])dv(?:$|[.\-_\s])"
+_HDR10_PATTERN = r"hdr(?:10\+?|\s*10\+?)"
+
+_HDR_DV_REGEX = re.compile(
+    rf"(?:{_DOLBY_VISION_PATTERN}|{_DOVI_PATTERN}|{_DV_TOKEN_PATTERN}|{_HDR10_PATTERN})",
+    re.I,
+)
+
+def needs_hdr10_dv_screenshot(mediainfo_text: str = "", file_name: str = "") -> bool:
+    """Return True when the media appears to be Dolby Vision or HDR10/10+.
+
+    Checks for common HDR/DV markers in either the mediainfo text or filename
+    (e.g., 'Dolby Vision', 'DVHE.07', '.DV.', 'HDR10', 'HDR 10+').
+    """
+    return bool(_HDR_DV_REGEX.search(file_name) or _HDR_DV_REGEX.search(mediainfo_text))
+
+def _build_screenshot_cmd(video: Path, timestamp: float, output_file: Path, hdr_dv: bool, crop: str | None = None) -> list[str]:
+    cmd = ["ffmpeg", "-ss", f"{timestamp:.3f}", "-i", str(video)]
+    if crop:
+        cmd += ["-vf", f"crop={crop}"]
+    if hdr_dv:
+        # Use -frames/-update for DV/HDR10 to avoid extra tone-mapping paths when grabbing a single frame.
+        cmd += ["-frames:v", "1", "-update", "1", "-q:v", "1"]
+    else:
+        cmd += ["-vframes", "1", "-q:v", "1"]
+    cmd += ["-y", str(output_file)]
+    return cmd
+
+
+def _detect_crop(video: Path, timestamp: float) -> str | None:
+    """Detect crop parameters for a single frame to remove black bars."""
+    try:
+        # cropdetect parameters use CROP_LUMINANCE_THRESHOLD / CROP_ROUNDING / CROP_RESET_INTERVAL.
+        # These defaults are generous to pick up letter/pillarboxing without over-cropping real content.
+        res = subprocess.run(
+            [
+                "ffmpeg",
+                "-ss",
+                f"{timestamp:.3f}",
+                "-i",
+                str(video),
+                "-vframes",
+                "1",
+                "-vf",
+                f"cropdetect={CROP_LUMINANCE_THRESHOLD}:{CROP_ROUNDING}:{CROP_RESET_INTERVAL}",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            startupinfo=hide_window(),
+            timeout=15,
+        )
+        stderr = res.stderr or ""
+        if res.returncode != 0:
+            error(f"ffmpeg cropdetect failed (code {res.returncode}) at {timestamp:.3f}s")
+            return None
+        matches = re.findall(r"crop=(\d+:\d+:\d+:\d+)", stderr)
+        if matches:
+            return matches[-1]
+    except Exception:
+        return None
+    return None
+
+def take_screenshots(video: Path, hdr_dv: bool, count: int = SCREENSHOT_COUNT) -> list[Path]:
+    log(f"Taking {count} full-size screenshots (20% → 80%)...", "Camera")
+    try:
+        duration = float(subprocess.check_output([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(video)
+        ], startupinfo=hide_window()).decode().strip())
+    except: return []
+
+    if duration <= 0: return []
+
+    start_percent, end_percent = 0.20, 0.80
+    total_range = end_percent - start_percent
+    files = []
+    max_size_mb = 32 if IMAGE_HOST.lower() == "imgbb" else 64
+
+    crop = None
+    def _timestamp(progress: float) -> float:
+        return duration * (start_percent + (total_range * progress))
+
+    if CROP_BLACK_BARS:
+        # Detect crop once (first sample) and reuse; assumes aspect ratio stays consistent across the video.
+        # Variable-AR titles (e.g., IMAX sequences) may keep letterboxing in some captures.
+        first_progress = 1 / (count + 1)
+        first_timestamp = _timestamp(first_progress)
+        crop = _detect_crop(video, first_timestamp)
+
+    for i in range(1, count + 1):
+        progress = i / (count + 1)
+        timestamp = _timestamp(progress)
+        ext = "png" if LOSSLESS_SCREENSHOT else "jpg"
+        output_file = Path(f"ss_{i:02d}.{ext}")
+
+        cmd = _build_screenshot_cmd(video, timestamp, output_file, hdr_dv, crop=crop)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hide_window())
+
+        if output_file.exists():
+            size_mb = output_file.stat().st_size / (1024 * 1024)
+            if LOSSLESS_SCREENSHOT and ext == "png" and size_mb > max_size_mb:
+                output_file.unlink()
+                jpeg_file = Path(f"ss_{i:02d}.jpg")
+                cmd_jpg = _build_screenshot_cmd(video, timestamp, jpeg_file, hdr_dv, crop=crop)
+                subprocess.run(cmd_jpg, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hide_window())
+                if jpeg_file.exists():
+                    files.append(jpeg_file)
+                    print(f"   {c.YELLOW}Success {i}/{count} → JPEG (PNG too big){c.RESET}")
+                continue
+            files.append(output_file)
+            fmt = "PNG" if ext == "png" else "JPG"
+            print(f"   {c.GREEN}Success {i}/{count} → {fmt} ({size_mb:.1f} MB){c.RESET}")
+        else:
+            print(f"   {c.RED}Failed {i}/{count}{c.RESET}")
+    return files
+
+def _parse_upload_error_message(data: dict) -> str:
+    err = data.get("error")
+    if err is None:
+        return "unknown error (no error field)"
+    if isinstance(err, dict):
+        return str(err.get("message") or err.get("info") or err)
+    if err:
+        return str(err)
+    return "unknown error"
+
+def _upload_via_host(img: Path, host: str, timeout: int = UPLOAD_TIMEOUT) -> tuple[str | None, bool]:
+    """Upload a single image to a given host.
+
+    Returns a tuple of (direct_url, fatal_error). fatal_error is True for non-retriable
+    file errors (e.g., missing/locked files) so the caller can skip host fallbacks.
+    """
+    filename = img.name
+    try:
+        if host == "imgbb":
+            if IMGBB_API_KEY == "YOUR IMGBB API KEY": return None, False
+            encoded_name = quote(filename, safe="")
+            with img.open("rb") as fh:
+                r = requests.post(
+                    "https://api.imgbb.com/1/upload",
+                    params={"key": IMGBB_API_KEY},
+                    data={"name": encoded_name},
+                    files={"image": fh},
+                    timeout=timeout,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    image_data = data.get("data") or {}
+                    # Prefer url over display_url when url is available and non-empty.
+                    direct_url = image_data.get("url")
+                    display_url = image_data.get("display_url")
+                    image_url = direct_url if direct_url else display_url
+                    if data.get("success") and image_url:
+                        return image_url, False
+                    error(f"imgbb upload failed for {filename}: {_parse_upload_error_message(data)}")
+        elif host == "freeimage":
+            encoded_name = quote(filename, safe="")
+            with img.open("rb") as fh:
+                r = requests.post(
+                    "https://freeimage.host/api/1/upload",
+                    params={"key": FREEIMAGE_API_KEY},
+                    files={"source": fh},
+                    data={"format": "json", "name": encoded_name},
+                    timeout=timeout,
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get("status_code") == 200 and data.get("image", {}).get("url"):
+                        return data["image"]["url"], False
+                    error(f"freeimage upload failed for {filename}: {_parse_upload_error_message(data)}")
+    except json.JSONDecodeError as exc:
+        error(f"{host} upload failed for {filename}: invalid JSON response ({exc})")
+    except requests.RequestException as exc:
+        error(f"{host} upload failed for {filename}: network/API error ({exc})")
+    except OSError as exc:
+        error(f"{host} upload failed for {filename}: file error while reading image ({exc})")
+        return None, True
+    return None, False
+
+def upload_image(img: Path) -> str | None:
+    """Upload an image using the preferred host with a single fallback.
+
+    If IMAGE_HOST is unsupported, the function defaults to imgbb then freeimage.
+    Retries are skipped when _upload_via_host reports a fatal (file) error.
+    """
+    primary = _DEPRECATED_HOST_ALIASES.get(IMAGE_HOST.lower(), IMAGE_HOST.lower())
+    supported_hosts = ("imgbb", "freeimage")
+    if primary not in supported_hosts:
+        error(f"Unsupported IMAGE_HOST '{primary}', defaulting to supported hosts")
+        hosts = list(supported_hosts)
+    else:
+        # Preserve configured host order and then try remaining supported hosts as fallbacks.
+        hosts = [primary] + [h for h in supported_hosts if h != primary]
+
+    for idx, host in enumerate(hosts):
+        url, fatal = _upload_via_host(img, host)
+        if url:
+            if idx > 0:
+                success(f"Fallback upload via {host} succeeded for {img.name}")
+            return url
+        if fatal:
+            break
+        if idx < len(hosts) - 1:
+            next_host = hosts[idx + 1]
+            log(f"Retrying {img.name} via {next_host}...", "Upload", c.YELLOW)
+    return None
+
+def print_progress(done: int, total: int):
+    bar_length = 10
+    filled = int(bar_length * done // total)
+    bar = "█" * filled + "▒" * (bar_length - filled)
+    print(f"\r{c.CYAN}Uploading {total} screenshots... [{bar}] {done}/{total} uploaded{c.RESET}", end="", flush=True)
+    if done == total: print()
+
+def _bounded_workers(total_items: int) -> int:
+    """Return a conservative worker count for I/O-bound uploads.
+
+    Uses the MIN_IO_WORKERS/IO_WORKER_MULTIPLIER tuning for upload tasks and caps
+    workers by the configured limit, the items to process, and a modest scaling
+    factor to avoid spawning more threads than the workload can use.
+    """
+    cpu_count = os.cpu_count() or 1
+    max_io_workers = max(MIN_IO_WORKERS, cpu_count * IO_WORKER_MULTIPLIER)
+    return max(1, min(MAX_CONCURRENT_UPLOADS, total_items, max_io_workers))
+
+def gui_select_target() -> tuple[Path, bool]:
+    if tk is None or filedialog is None:
+        raise RuntimeError("tkinter is not available")
+    root = tk.Tk(); root.withdraw(); root.update()
+    while True:
+        banner()
+        print(f"{c.BOLD}{c.CYAN}Choose an option:{c.RESET}")
+        print(f"  {c.WHITE}1{c.RESET} - Select a single video file")
+        print(f"  {c.WHITE}2{c.RESET} - Select an entire folder")
+        print(f"  {c.GRAY}(q to quit){c.RESET}\n")
+        choice = input(f"{c.BOLD}Enter 1 or 2: {c.RESET}").strip().lower()
+        if choice == 'q': sys.exit(0)
+        if choice == '1':
+            f = filedialog.askopenfilename(title="Select a Video File", filetypes=[("Video Files", "*.mkv *.mp4 *.avi")])
+            if f: return Path(f), False
+        elif choice == '2':
+            f = filedialog.askdirectory(title="Select Folder")
+            if f: return Path(f), True
+
+def cli_select_target() -> tuple[Path, bool]:
+    current = Path.cwd().resolve()
+    while True:
+        banner()
+        print(f"{c.BOLD}{c.CYAN}Current directory: {current}{c.RESET}")
+        items = sort_paths_by_mtime([
+            p for p in current.iterdir()
+            if (p.is_dir() and p.name != "__pycache__") or p.suffix.lower() in VIDEO_EXTS or p.suffix.lower() in AUDIO_EXTS or p.suffix.lower() in PDF_EXTS
+        ])
+        if not items:
+            choice = input(f"{c.BOLD}Enter 0 to go back or q to quit: {c.RESET}").strip().lower()
+            if choice == '0' and current != Path.cwd().resolve(): current = current.parent; continue
+            elif choice == 'q': sys.exit(0)
+            else: continue
+        for i, item in enumerate(items, 1):
+            typ = f"{c.PURPLE}Dir{c.RESET}" if item.is_dir() else f"{c.CYAN}File{c.RESET}"
+            print(f"  {c.WHITE}{i}{c.RESET}. {item.name} ({typ})")
+        print(f"  {c.WHITE}0{c.RESET}. Go back" if current != Path.cwd().resolve() else f"  {c.WHITE}0{c.RESET}. Quit")
+        choice = input(f"{c.BOLD}Enter number: {c.RESET}").strip().lower()
+        if choice == 'q': sys.exit(0)
+        if choice == '0':
+            if current == Path.cwd().resolve(): sys.exit(0)
+            current = current.parent; continue
+        try:
+            num = int(choice)
+            if 1 <= num <= len(items):
+                selected = items[num - 1]
+                if selected.is_dir():
+                    sub = input(f"{c.BOLD}Navigate (n) or select (s)? {c.RESET}").strip().lower()
+                    if sub == 'n': current = selected
+                    elif sub == 's': return selected, True
+                else: return selected, False
+        except: pass
+
+def select_target() -> tuple[Path, bool]:
+    if USE_GUI_FILE_PICKER and tk is not None:
+        return gui_select_target()
+    return cli_select_target()
+
+def detect_language(mediainfo_text: str) -> str:
+    lang_options = {
+        'English': '1', 'Hindi': '3', 'Arabic': '18', 'Bengali': '8',
+        'Bulgarian': '14', 'Chinese': '5', 'Czech': '15', 'Danish': '24',
+        'Dutch': '25', 'Filipino': '16', 'Finnish': '26', 'French': '2',
+        'German': '9', 'Greek': '27', 'Hebrew': '28', 'Hungarian': '17',
+        'Icelandic': '30', 'Indonesian': '31', 'Irish': '32', 'Italian': '12',
+        'Japanese': '7', 'Kannada': '41', 'Korean': '10', 'Malayalam': '33',
+        'Marathi': '34', 'Norwegian': '35', 'Panjabi': '43', 'Persian': '36',
+        'Polish': '37', 'Portuguese': '38', 'Romanian': '39', 'Russian': '13',
+        'Serbian': '19', 'Spanish': '6', 'Swedish': '20', 'Tamil': '21',
+        'Telugu': '11', 'Thai': '40', 'Turkish': '22', 'Urdu': '4',
+        'Vietnamese': '23',
+    }
+    match = re.search(r'Language\s*:\s*([^\r\n]+)', mediainfo_text or "")
+    if not match:
+        return "1"
+    language = match.group(1).strip().split(" / ")[0]
+    language = re.sub(r'\s*\([^)]*\)\s*$', '', language).strip().lower()
+    lang_options_lower = {name.lower(): language_id for name, language_id in lang_options.items()}
+    return lang_options_lower.get(language, "0")
+
+def sort_paths_by_mtime(paths: list[Path]) -> list[Path]:
+    mtimes = {p: p.stat().st_mtime for p in paths}
+    return sorted(paths, key=lambda p: (mtimes[p], p.name.lower()))
+
+def trim_mediainfo_complete_name(mediainfo_text: str, base_dir: Path) -> str:
+    """Remove selected base directory prefix from MediaInfo 'Complete name' paths."""
+    prefix = str(base_dir)
+    prefix_posix = prefix.replace("\\", "/").rstrip("/") + "/"
+    prefix_windows = prefix.replace("/", "\\").rstrip("\\") + "\\"
+
+    def _trim_complete_name_path(match: re.Match) -> str:
+        label = match.group(1)
+        full_path = match.group(2).strip()
+        if full_path.startswith(prefix_posix):
+            return f"{label}{full_path[len(prefix_posix):]}"
+        if full_path.startswith(prefix_windows):
+            return f"{label}{full_path[len(prefix_windows):]}"
+        return match.group(0)
+
+    return re.sub(r"(^\s*Complete name\s*:\s*)([^\r\n]+)", _trim_complete_name_path, mediainfo_text or "", flags=re.MULTILINE)
+
+def detect_category(title: str, mediainfo_text: str = "") -> str | None:
+    webrip_regex = re.compile(r'(Webrip|WebRip|WEBRip|WEBRIP|WEBRiP|DS4K|WEB[\s-]?Rip)', re.I)
+    webdl_regex = re.compile(r'(WEB-DL|web-dl|WEBDL|webdl|WEB-dl|WEB DL|WEB[\s-]?DL)', re.I)
+    lossless_regex = re.compile(r'(Remux|REMUX|remux|ReMux)', re.I)
+    bluray_regex = re.compile(r'(BluRay|blu-ray|BLURAY|Blu-Ray|bluray|Blu-ray|BRrip|brrip|BRRIP|BR-Rip|BR[\s-]?RIP|SDRip|SD[\s-]?Rip)', re.I)
+    hdrip_regex = re.compile(r'(HDRip|HD[\s-]?RIP|HD Rip|WEBHDRIP|WEB[\s-]?HD[\s-]?RIP)', re.I)
+    dvdrip_regex = re.compile(r'(DVD|DVDRIP|DVD[\s-]?RIP)', re.I)
+    cam_regex = re.compile(r'(CAM|HDTC|HDCAM|HD[\s-]?CAM|HDTS|HD[\s-]?TS|DVDSCR|PREDVD|PRE DVD|S[\s-]?print|Pre[\s-]?DVD|Pre[\s-]?DVDRip)', re.I)
+    games_regex = re.compile(r'(Fitgirl|Dodi|KaOs|ElAmigos|TENOKE|FLT|RUNE|PLAZA|-GOG|SKIDROW|GOG)', re.I)
+    games_backup_regex = re.compile(r'(Steam Game Backup|Steam Backup|Epic Backup|Rockstar Backup|Origin\/EA Backup|EA Backup|Ubisoft Backup|Battle\.net Backup)', re.I)
+    crack_regex = re.compile(r'(Crack|crack[\s-]?only|crack only|Patch|Patchs|Crackfix)', re.I)
+    awards_regex = re.compile(r'(Awards|Award|Ceremony)', re.I)
+    audiobook_regex = re.compile(r'(audiobook|Audiobook|AudioBook|Audio Book|Audio[\s-]?book)', re.I)
+    tutorial_regex = re.compile(r'(Udemy|Talkpython|Skillshare|Domestika|Fireship|CodeWithMosh|Educative|PacktPub|O\'Reilly Learning|ZeroToMastery|Oreilly|Dometrain|CGBoost|FrontendMasters)', re.I)
+    uhd_resolution_regex = re.compile(r'(2160p|2160|4K)', re.I)
+    hd_resolution_regex = re.compile(r'(1080p|1080P|1080)', re.I)
+    sd_resolution_regex = re.compile(r'(720p|720P|720)', re.I)
+    episode_regex = re.compile(r'S\d+E\d+', re.I)
+    season_regex = re.compile(r'S\d+', re.I)
+    # Match each Audio section body until the next top-level section header.
+    audio_section_regex = re.compile(
+        r'^\s*Audio(?:\s*#\d+)?\s*$([\s\S]*?)(?=^\s*(?:General|Video|Audio(?:\s*#\d+)?|Text(?:\s*#\d+)?|Menu)\s*$|\Z)',
+        re.I | re.M,
+    )
+    japanese_audio_regex = re.compile(r'^\s*Language\s*:\s*Japanese(?:\s*\([^)]*\))?\s*$', re.I | re.M)
+    has_japanese_audio = any(japanese_audio_regex.search(section.group(1)) for section in audio_section_regex.finditer(mediainfo_text or ""))
+
+    if has_japanese_audio and (episode_regex.search(title) or season_regex.search(title)):
+        return '28'
+
+    if WRESTLING_REGEX.search(title):
+        return CATEGORY_PRO_WRESTLING
+
+    if webrip_regex.search(title) and not episode_regex.search(title) and not season_regex.search(title) and not awards_regex.search(title):
+        return '83'
+    if webdl_regex.search(title) and (sd_resolution_regex.search(title) or hd_resolution_regex.search(title)) and not episode_regex.search(title) and not season_regex.search(title) and not awards_regex.search(title):
+        return '55'
+    if webdl_regex.search(title) and uhd_resolution_regex.search(title) and not episode_regex.search(title) and not season_regex.search(title) and not awards_regex.search(title):
+        return '82'
+    if lossless_regex.search(title) and (sd_resolution_regex.search(title) or hd_resolution_regex.search(title)) and not episode_regex.search(title) and not season_regex.search(title):
+        return '76'
+    if lossless_regex.search(title) and uhd_resolution_regex.search(title) and not episode_regex.search(title) and not season_regex.search(title):
+        return '86'
+    if bluray_regex.search(title) and uhd_resolution_regex.search(title) and not episode_regex.search(title) and not season_regex.search(title):
+        return '80'
+    if bluray_regex.search(title) and hd_resolution_regex.search(title) and not episode_regex.search(title) and not season_regex.search(title) and not awards_regex.search(title):
+        return '47'
+    if bluray_regex.search(title) and sd_resolution_regex.search(title) and not episode_regex.search(title) and not season_regex.search(title) and not awards_regex.search(title):
+        return '42'
+    if bluray_regex.search(title) and not episode_regex.search(title) and not season_regex.search(title):
+        return '24'
+    if hdrip_regex.search(title) and not episode_regex.search(title) and not season_regex.search(title) and not awards_regex.search(title):
+        return '46'
+    if cam_regex.search(title) and not tutorial_regex.search(title) and not episode_regex.search(title) and not season_regex.search(title):
+        return '4'
+    if dvdrip_regex.search(title) and not games_backup_regex.search(title) and not episode_regex.search(title) and not season_regex.search(title):
+        return '1'
+    if episode_regex.search(title) and not games_backup_regex.search(title) and not sd_resolution_regex.search(title) and not hd_resolution_regex.search(title) and not uhd_resolution_regex.search(title) and not awards_regex.search(title):
+        return '5'
+    if episode_regex.search(title) and not games_backup_regex.search(title) and (hd_resolution_regex.search(title) or sd_resolution_regex.search(title)) and not awards_regex.search(title):
+        return '61'
+    if episode_regex.search(title) and not games_backup_regex.search(title) and uhd_resolution_regex.search(title) and not awards_regex.search(title):
+        return '84'
+    if season_regex.search(title) and not games_backup_regex.search(title) and not sd_resolution_regex.search(title) and not hd_resolution_regex.search(title) and not uhd_resolution_regex.search(title) and not awards_regex.search(title):
+        return '41'
+    if season_regex.search(title) and not games_regex.search(title) and (hd_resolution_regex.search(title) or sd_resolution_regex.search(title)) and not awards_regex.search(title):
+        return '62'
+    if season_regex.search(title) and uhd_resolution_regex.search(title) and not awards_regex.search(title):
+        return '85'
+
+    complete_name_match = re.search(r'Complete name\s*:\s*([^\r\n]+)', mediainfo_text or "")
+    if complete_name_match:
+        complete_name = complete_name_match.group(1).strip().lower()
+        if complete_name.endswith(('.m4b', '.pdf', '.epub')) or (audiobook_regex.search(title) and complete_name.endswith('.mp3') and not webdl_regex.search(title) and not webrip_regex.search(title) and not episode_regex.search(title) and not bluray_regex.search(title) and not hdrip_regex.search(title) and not games_backup_regex.search(title) and not games_regex.search(title)):
+            return CATEGORY_BOOKS
+        if complete_name.endswith('.flac'):
+            return '71'
+        if complete_name.endswith('.mp3'):
+            return '22'
+    return None
+
+
+# ── PDF Helpers ──────────────────────────────────────────────────────────────
+
+ISBN_PATTERN = re.compile(
+    r'\b97[89][0-9Xx\-\s]{10,}\b|\b\d{9}[\dXx]\b'
+)
+# Matches common ISBN-10/ISBN-13 patterns with optional separators.
+ORDINAL_EXCEPTIONS = (11, 12, 13)
+
+def _build_edition_label(num_str: str) -> str:
+    try:
+        num = int(num_str)
+        suffix = "th"
+        if num % 100 not in ORDINAL_EXCEPTIONS:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(num % 10, "th")
+        return f"{num}{suffix} Edition"
+    except (TypeError, ValueError):
+        return num_str
+
+
+def normalize_isbn(isbn: str | None) -> str | None:
+    digits = re.sub(r'[^0-9Xx]', '', isbn or "")
+    if len(digits) in (10, 13):
+        return digits.upper()
+    return None
+
+
+def _extract_edition_from_text(text: str) -> tuple[str | None, str]:
+    edition = None
+    updated = text
+    patterns = [
+        r'\b(\d{1,2})(?:st|nd|rd|th)?\s*(?:edition|ed)\b',
+        r'\b(\d{1,2})\s*e\b',
+    ]
+    for pat in patterns:
+        m = re.search(pat, updated, re.I)
+        if m:
+            edition = _build_edition_label(m.group(1))
+            updated = re.sub(pat, '', updated, flags=re.I).strip(" -._")
+            break
+    return edition, re.sub(r'\s+', ' ', updated).strip()
+
+
+def parse_pdf_filename(filename: str) -> dict:
+    """Extract a best-effort title/author/edition/isbn from a PDF filename."""
+    stem = Path(filename).stem
+    cleaned = re.sub(r'[._]+', ' ', stem)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip(" -._")
+
+    isbn_match = ISBN_PATTERN.search(cleaned)
+    isbn = normalize_isbn(isbn_match.group(0)) if isbn_match else None
+
+    edition, remaining = _extract_edition_from_text(cleaned)
+
+    title_part = remaining
+    author_part = ""
+
+    by_split = re.split(r'\bby\b', remaining, flags=re.I)
+    if len(by_split) > 1:
+        title_part = by_split[0].strip(" -")
+        author_part = " ".join(by_split[1:]).strip(" -")
+    elif " - " in remaining:
+        left, right = remaining.split(" - ", 1)
+        if re.search(r'\d', right) and not re.search(r'\d', left):
+            author_part = left
+            title_part = right
+        else:
+            title_part = left
+            author_part = right
+
+    authors = [a.strip() for a in re.split(r',|&| and ', author_part) if a.strip()]
+
+    return {
+        "title": re.sub(r'\s+', ' ', title_part).strip(),
+        "authors": authors,
+        "edition": edition,
+        "isbn": isbn,
+    }
+
+
+def fetch_book_info_by_isbn(isbn: str) -> dict | None:
+    if not isbn:
+        return None
+    try:
+        url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
+        r = requests.get(url, timeout=20)
+        if r.status_code == 429:
+            error("Book API rate limit reached (429). Please retry later.")
+            return None
+        if r.status_code >= 500:
+            error(f"Book API server error ({r.status_code}).")
+            return None
+        if r.status_code != 200:
+            error(f"Book API request failed with status {r.status_code}.")
+            return None
+        data = r.json()
+        items = data.get("items") or []
+        if not items:
+            return None
+        info = items[0].get("volumeInfo", {})
+        identifiers = {i.get("type"): i.get("identifier") for i in info.get("industryIdentifiers", []) if i.get("type") and i.get("identifier")}
+        edition_from_title, _ = _extract_edition_from_text(info.get("title") or "")
+        edition_from_subtitle, _ = _extract_edition_from_text(info.get("subtitle") or "")
+        return {
+            "title": info.get("title"),
+            "authors": info.get("authors") or [],
+            "publisher": info.get("publisher"),
+            "year": (info.get("publishedDate") or "").split("-")[0],
+            "description": info.get("description"),
+            "pageCount": info.get("pageCount"),
+            "isbn10": identifiers.get("ISBN_10"),
+            "isbn13": identifiers.get("ISBN_13"),
+            "edition": edition_from_title or edition_from_subtitle,
+        }
+    except (requests.RequestException, json.JSONDecodeError) as exc:
+        error(f"Book API lookup failed: {exc}")
+        return None
+
+
+def prompt_for_isbn() -> str | None:
+    while True:
+        user_input = input(f"{c.BOLD}Enter ISBN (leave blank to skip): {c.RESET}").strip()
+        if not user_input:
+            return None
+        normalized = normalize_isbn(user_input)
+        if normalized:
+            return normalized
+        print(f"{c.RED}Invalid ISBN. Please try again.{c.RESET}")
+
+
+def build_book_info(pdf_path: Path, page_count: int | None) -> dict:
+    parsed = parse_pdf_filename(pdf_path.name)
+    isbn = parsed.get("isbn")
+    book_info = {
+        "title": parsed.get("title"),
+        "authors": parsed.get("authors") or [],
+        "edition": parsed.get("edition"),
+        "isbn": isbn,
+        "publisher": None,
+        "year": None,
+        "description": None,
+        "pageCount": page_count,
+        "isbn10": None,
+        "isbn13": None,
+    }
+
+    api_data = fetch_book_info_by_isbn(isbn) if isbn else None
+    # Prompt for an ISBN when no API data is available—this enriches metadata even
+    # when filenames already provide a title/author but lack an ISBN.
+    has_isbn = bool(isbn)
+    has_title = bool(book_info["title"])
+    has_authors = bool(book_info["authors"])
+    needs_isbn_prompt = not api_data and (not has_isbn or not has_title or not has_authors)
+    # When no API data is available, prompt if the ISBN or core metadata is missing to enrich details.
+    if needs_isbn_prompt:
+        isbn_from_user = prompt_for_isbn()
+        if isbn_from_user:
+            api_data = fetch_book_info_by_isbn(isbn_from_user)
+            book_info["isbn"] = isbn_from_user
+
+    if api_data:
+        for key in ["title", "authors", "publisher", "year", "description", "pageCount", "isbn10", "isbn13"]:
+            if api_data.get(key):
+                book_info[key] = api_data[key]
+        if not book_info["edition"] and api_data.get("edition"):
+            book_info["edition"] = api_data["edition"]
+        if not book_info["isbn"]:
+            book_info["isbn"] = api_data.get("isbn13") or api_data.get("isbn10")
+
+    if not book_info["title"]:
+        isbn_value = book_info.get("isbn")
+        if isbn_value:
+            book_info["title"] = f"ISBN: {isbn_value}"
+        else:
+            book_info["title"] = pdf_path.stem
+
+    if not book_info["pageCount"]:
+        book_info["pageCount"] = page_count
+
+    return book_info
+
+
+def get_pdf_page_count(pdf_path: Path) -> int | None:
+    if shutil.which("pdfinfo"):
+        try:
+            res = subprocess.run(
+                ["pdfinfo", str(pdf_path)],
+                capture_output=True,
+                text=True,
+                startupinfo=hide_window(),
+                timeout=10,
+            )
+            if res.returncode == 0:
+                match = re.search(r'^Pages:\s+(\d+)', res.stdout, re.M)
+                if match:
+                    return int(match.group(1))
+        except (subprocess.SubprocessError, subprocess.TimeoutExpired, OSError) as exc:
+            error(f"pdfinfo failed: {exc}")
+    try:
+        if PyPDF2 is None:
+            return None
+        with open(pdf_path, "rb") as f:
+            reader = PyPDF2.PdfReader(f)
+            return len(reader.pages)
+    except (OSError, AttributeError) as exc:
+        error(f"PyPDF2 fallback failed: {exc}")
+        return None
+
+
+def pick_pdf_pages(page_count: int | None, sample_count: int = 5) -> list[int]:
+    """Pick preview pages for images; distributes selections evenly for consistency."""
+    pages = [1]
+    if page_count and page_count > 1:
+        take = min(sample_count, page_count - 1)
+        step = (page_count - 1) / (take + 1)
+        for idx in range(take):
+            page = 1 + round((idx + 1) * step)
+            page = min(page_count, max(2, page))
+            pages.append(page)
+        pages[1:] = sorted(dict.fromkeys(pages[1:]))
+    return pages
+
+
+def render_pdf_pages(pdf_path: Path, pages: list[int]) -> list[Path]:
+    if not shutil.which("pdftoppm"):
+        error("pdftoppm not found! Install poppler-utils to extract PDF pages.")
+        return []
+    outputs = []
+    def _render_page(page: int) -> Path | None:
+        prefix = f"pdf_page_{page:03d}"
+        cmd = ["pdftoppm", "-f", str(page), "-l", str(page), "-png", str(pdf_path), prefix]
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, startupinfo=hide_window(), timeout=60)
+            candidates = sorted(
+                p for p in Path(".").glob(f"{prefix}-*.png")
+                if re.fullmatch(rf"{re.escape(prefix)}-\d+\.png", p.name)
+            )
+            if not candidates:
+                candidates = [
+                    Path(f"{prefix}-001.png"),
+                    Path(f"{prefix}-01.png"),
+                    Path(f"{prefix}-1.png"),
+                ]
+            generated = next((p for p in candidates if p.exists()), None)
+            if generated:
+                final_name = Path(f"{prefix}.png")
+                generated.rename(final_name)
+                log(f"Extracted PDF page {page}: {generated.name} → {final_name.name}", "PDF")
+                GENERATED_PDF_IMAGES.append(final_name)
+                return final_name
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            extra = ""
+            if isinstance(e, subprocess.CalledProcessError) and e.stderr:
+                extra = f": {e.stderr.decode(errors='ignore').strip()}"
+            error(f"Failed to extract page {page}{extra or f': {e}'}")
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(4, len(pages)))) as executor:
+        for result in executor.map(_render_page, pages):
+            if result:
+                outputs.append(result)
+    return outputs
+
+
+def build_pdf_title(book_info: dict) -> str:
+    authors = book_info.get("authors") or []
+    author_str = authors[0] if authors else "Unknown"
+    edition = book_info.get("edition")
+    edition_block = f" [{edition}]" if edition else ""
+    return f"{author_str} - {book_info.get('title', '').strip()}{edition_block} [PDF]".strip()
+
+
+def _resolve_isbn_values(book_info: dict) -> tuple[str, str]:
+    isbn10 = book_info.get("isbn10")
+    isbn13 = book_info.get("isbn13")
+    isbn_generic = book_info.get("isbn")
+    if not isbn10 and isbn_generic and len(isbn_generic) == 10:
+        isbn10 = isbn_generic
+    if not isbn13 and isbn_generic and len(isbn_generic) == 13:
+        isbn13 = isbn_generic
+    return isbn10 or "Unknown", isbn13 or "Unknown"
+
+
+def generate_pdf_description(book_info: dict, cover_url: str, screenshot_urls: list[str], mediainfo_text: str) -> str:
+    edition = book_info.get("edition") or "N/A"
+    authors = ", ".join(book_info.get("authors") or []) or "Unknown"
+    publisher = book_info.get("publisher") or "Unknown"
+    year = book_info.get("year") or "Unknown"
+    isbn10, isbn13 = _resolve_isbn_values(book_info)
+    page_count = book_info.get("pageCount") or "Unknown"
+    description_text = book_info.get("description") or "N/A"
+    ss_bbcode = "\n".join([f"[img]{u}[/img]" for u in screenshot_urls]) if screenshot_urls else "Screenshots not available."
+    cover_bbcode = cover_url if cover_url.startswith("[img]") else f"[img]{cover_url}[/img]" if cover_url else "Cover not available."
+
+    return f"""[color=#FF8040][center][font=Segoe UI][size=5]Title:  {book_info.get('title', 'Unknown')}[/size][/font]
+    [/color]
+
+{cover_bbcode}
+[color=#7EC544]
+[font=Segoe UI]
+[size=5]Edition: {edition}
+By: {authors}
+Publisher: {publisher}, {year}
+ISBN-10: {isbn10}
+ISBN-13: {isbn13}
+Page Count:  {page_count}[/size][/font][/color][/center]
+[font=Segoe UI][size=4][color=#d500f9]Description: {description_text}[/color]
+[/size][/font]
+[center]
+[b][size=5][color=#59E817][font=Segoe UI]MediaInfo[/font][/color][/size][/b][/center][font=Courier New][mediainfo]
+{mediainfo_text}
+[/mediainfo]
+[/font]
+[center][b][size=5][font=Tahoma][color=#59E817]Screenshots[/color][/size][/b]
+[/center][center][/font]
+{ss_bbcode}
+[/center]
+[hr][i][b][center][font=Segoe UI][size=4][color=#FFD700]If you're downloading my torrent and not getting the desired speed, just comment, and I'll move it to my seedbox.[/color][/size][/font][/center][/b][/i]"""
+
+def format_title_for_metadata(target_path: Path, is_folder: bool, video_path: Path | None = None, torrent_name: str | None = None) -> str:
+    if is_folder and not video_path:
+        return target_path.name
+
+    source_path = video_path if (is_folder and video_path) else target_path
+    stem = source_path.stem
+
+    # Pattern that identifies fansub episode-range packs is defined at module level.
+
+    if is_folder and torrent_name:
+        folder_has_episode = bool(re.search(r'\bS\d{2}E\d{2}\b', target_path.name, re.I))
+        file_has_episode = bool(re.search(r'\bS\d{2}E\d{2}\b', stem, re.I))
+        torrent_has_episode = bool(re.search(r'\bS\d{2}E\d{2}\b', torrent_name, re.I))
+
+        if file_has_episode and not folder_has_episode and not torrent_has_episode:
+            try:
+                return generate_title(str(target_path))
+            except Exception:
+                return target_path.name.replace('.torrent', '')
+
+        # Detect a fansub multi-episode pack (torrent or folder contains a range
+        # like "01 ~ 10").  Individual episode sub-titles should not be included.
+        pack_names = [torrent_name, target_path.name]
+        is_fansub_pack = any(_FANSUB_PACK_RANGE_RE.search(n) for n in pack_names if n)
+        if is_fansub_pack:
+            try:
+                return generate_title(str(source_path), is_pack=True)
+            except Exception as exc:
+                error(f"Title generation failed for {source_path.name}: {exc}")
+                return target_path.name
+
+    preformatted_tech_block = (
+        r'\([^)]*\b(?:WEB-DL|WEBRip|BluRay|2160p|1080p|720p|'
+        r'x264|x265|H\.?264|H\.?265|DDP?\d|DD\+\d|AAC)\b[^)]*\)'
+    )
+    if re.search(r'\bS\d{2}E\d{2}\b', stem) and " - " in stem:
+        return stem
+    if (
+        re.search(r'\bS\d{2}E\d{2}\b', stem)
+        and re.search(preformatted_tech_block, stem, re.I)
+        and re.search(r'\[[^\]]+\]\s*$', stem)
+    ):
+        anime_format_match = re.match(
+            r'^(?P<show>.+?)\s+\(\d{4}\)\s+(?P<ep>S\d{2}E\d{2})\s+\((?P<tech>[^)]*?)\)\s+\[(?P<group>[^\]]+)\]\s*$',
+            stem,
+            re.I,
+        )
+        if anime_format_match:
+            show = anime_format_match.group("show").strip()
+            episode = anime_format_match.group("ep").upper()
+            tech = anime_format_match.group("tech").strip()
+            group = anime_format_match.group("group").strip()
+
+            video_match = re.search(r'\b(?:H\.?264|H\.?265|x264|x265|AV1|HEVC|AVC)\b', tech, re.I)
+            audio_match = re.search(r'\b(?:AAC|DDP|DD\+|DD|TrueHD|DTS(?:-HD)?|FLAC|Opus)\b', tech, re.I)
+
+            video = ""
+            audio = ""
+            audio_channels = ""
+            remaining = tech
+
+            if video_match:
+                video = video_match.group(0).upper().replace(".", "")
+                remaining = re.sub(re.escape(video_match.group(0)), " ", remaining, count=1, flags=re.I)
+
+            if audio_match:
+                audio = audio_match.group(0).upper()
+                remaining = re.sub(re.escape(audio_match.group(0)), " ", remaining, count=1, flags=re.I)
+                ch_match = re.search(r'\b([2-9](?:[.\s][0-1])?)\b', remaining)
+                if ch_match:
+                    audio_channels = ch_match.group(1).replace(".", " ")
+                    remaining = remaining[:ch_match.start()] + " " + remaining[ch_match.end():]
+
+            remaining = re.sub(r'\s+', ' ', remaining).strip()
+            bits = [show, episode]
+            if remaining:
+                bits.append(remaining)
+            if audio:
+                bits.append(f"{audio} {audio_channels}".strip())
+            if video:
+                bits.append(video)
+            return f"{' '.join(bits)}-{group}"
+        return stem
+
+    try:
+        return generate_title(str(source_path))
+    except Exception as exc:
+        error(f"Title generation failed for {source_path.name}: {exc}")
+        return target_path.name
+
+def main():
+
+    global LATEST_JSON, GENERATED_TXT, EXTRACTED_COVER
+
+    target_path, is_folder = select_target()
+    if not target_path or not target_path.exists(): return
+
+    sync_dir = target_path.parent
+    LATEST_JSON = sync_dir / "latest.json"
+
+    if LATEST_JSON.exists(): LATEST_JSON.unlink()
+
+    clear(); banner()
+    print(f"{c.BOLD}{c.PURPLE}Selected → {target_path.name}{c.RESET} {'(Folder Mode)' if is_folder else ''}\n")
+
+    if not create_torrent(target_path):
+        if CREATE_TORRENT_FILE: input("\nPress Enter to exit..."); return
+
+    is_audio_folder = False
+    is_pdf = False
+    audio_files = []
+    video_files = []
+    pdf_files = []
+
+    if is_folder:
+        audio_files = sort_paths_by_mtime([f for f in target_path.rglob('*') if f.is_file() and f.suffix.lower() in AUDIO_EXTS])
+        video_files = sort_paths_by_mtime([f for f in target_path.rglob('*') if f.is_file() and f.suffix.lower() in VIDEO_EXTS])
+        pdf_files = sort_paths_by_mtime([f for f in target_path.rglob('*') if f.is_file() and f.suffix.lower() in PDF_EXTS])
+
+        if audio_files and not video_files and not pdf_files:
+            is_audio_folder = True
+        elif pdf_files and not audio_files and not video_files:
+            is_pdf = True
+        elif not audio_files and not video_files and not pdf_files:
+            error("No audio, video, or PDF files found!")
+            return
+    elif target_path.suffix.lower() in AUDIO_EXTS:
+        is_audio_folder = True
+        audio_files = [target_path]
+    elif target_path.suffix.lower() in PDF_EXTS:
+        is_pdf = True
+        pdf_files = [target_path]
+    else:
+        video_files = [target_path]
+
+    if is_audio_folder:
+        if not audio_files:
+            error("No audio files found!")
+            return
+
+        # ── Discography detection (needed before spectrogram) ────────────────
+        is_discography_selection = False
+        if is_folder:
+            relative_parts_list: list[tuple[str, ...]] = []
+            for f in audio_files:
+                try:
+                    relative_parts_list.append(f.relative_to(target_path).parts)
+                except ValueError:
+                    continue
+            top_level_album_dirs = {
+                parts[0]
+                for parts in relative_parts_list
+                if len(parts) > 1
+            }
+            is_discography_selection = len(top_level_album_dirs) > 1
+
+        # ── Representative audio for metadata / mediainfo ─────────────────────
+        first_audio = select_representative_audio_file(audio_files, target_path if is_folder else None)
+        metadata = extract_audio_metadata(first_audio)
+
+        mediainfo_text = get_mediainfo(first_audio)
+        mediainfo_text = trim_mediainfo_complete_name(mediainfo_text, sync_dir)
+
+        # ── Spectrogram ───────────────────────────────────────────────────────
+        # Use 3 spectrograms when at least 3 tracks are available; otherwise
+        # include 2 spectrograms as fallback.
+        preferred_spectrogram_audio = random.choice(audio_files) if is_discography_selection else first_audio
+        spectrogram_audios = select_audio_files_for_spectrograms(audio_files, preferred_spectrogram_audio, fallback_count=2)
+        spectrogram_entries: list[tuple[str, str]] = []
+        for index, spectrogram_audio in enumerate(spectrogram_audios, start=1):
+            log(f"Creating spectrogram {index}/{len(spectrogram_audios)} for {spectrogram_audio.name}...", "Audio")
+            spectrogram = create_spectrogram(spectrogram_audio)
+            if not spectrogram:
+                error("Spectrogram creation failed!")
+                return
+
+            log(f"Uploading spectrogram {index}/{len(spectrogram_audios)}...", "Upload")
+            spectrogram_url = upload_image(spectrogram)
+            if not spectrogram_url:
+                error("Spectrogram upload failed!")
+                return
+            spectrogram_entries.append((spectrogram_audio.name, spectrogram_url))
+        success("Spectrogram(s) uploaded!")
+
+        # ── Cover ─────────────────────────────────────────────────────────────
+        cover_url = AUDIO_NO_COVER_PLACEHOLDER
+        local_cover_path = None
+        cover_search_dir = target_path if is_folder else target_path.parent
+        cover_image = find_cover_image(cover_search_dir)
+        if cover_image:
+            log(f"Found cover image: {cover_image.name}", "Cover")
+            local_cover_path = cover_image
+        else:
+            if is_discography_selection:
+                log(f"No root cover found for discography selection; using {AUDIO_NO_COVER_PLACEHOLDER}", "Cover")
+            else:
+                log("No cover image found in folder, trying embedded cover...", "Cover")
+                extracted = extract_cover_from_audio(audio_files, sync_dir)
+                if extracted:
+                    EXTRACTED_COVER = extracted
+                    local_cover_path = extracted
+                    log("Extracted embedded cover from audio track", "Cover")
+                else:
+                    log("No cover found (folder or embedded)", "Cover")
+
+        if local_cover_path:
+            log("Uploading cover image...", "Upload")
+            uploaded_cover_url = upload_image(local_cover_path)
+            if uploaded_cover_url:
+                cover_url = f"[img]{uploaded_cover_url}[/img]"
+                success("Cover image uploaded!")
+            else:
+                error(f"Cover image upload failed, using {AUDIO_NO_COVER_PLACEHOLDER}")
+
+        # ── FakingTheFunk proof image ─────────────────────────────────────────
+        fakingthefunk_url: str | None = None
+        ftf_search_root = target_path if is_folder else target_path.parent
+        fakingthefunk_image = find_fakingthefunk_image(ftf_search_root)
+        if fakingthefunk_image:
+            log(f"Found FakingTheFunk proof: {fakingthefunk_image.name}", "Proof")
+            log("Uploading FakingTheFunk proof image...", "Upload")
+            fakingthefunk_url = upload_image(fakingthefunk_image)
+            if fakingthefunk_url:
+                success("FakingTheFunk proof uploaded!")
+            else:
+                error("FakingTheFunk proof upload failed; it will be omitted from description")
+                fakingthefunk_url = None
+
+        tracklist = generate_audio_tracklist(audio_files, target_path if is_folder else None)
+        description = generate_audio_description(target_path.name, cover_url, mediainfo_text, tracklist, spectrogram_entries, fakingthefunk_url)
+
+        title = generate_audio_title(target_path.name, metadata)
+
+        if not SKIP_TXT:
+            save_name = f"{target_path.name}_description.txt" if is_folder else f"{target_path.stem}_TBD_Description.txt"
+            txt_path = target_path.parent / save_name
+            txt_path.write_text(description, encoding="utf-8")
+            GENERATED_TXT = txt_path
+            success(f"Saved → {save_name}")
+
+        copy_to_clipboard(description)
+
+        if START_HTTP_SERVER:
+            try:
+                torrent_filename = f"{target_path.name}.torrent"
+                category = "71" if metadata.get("codec") == "FLAC" else "22"
+                language = detect_language(mediainfo_text)
+                payload = {
+                    "ready": True,
+                    "title": title,
+                    "category": category,
+                    "language": language,
+                    "description": description,
+                    "torrentFile": torrent_filename
+                }
+
+                if local_cover_path:
+                    payload["coverFile"] = str(local_cover_path.relative_to(sync_dir)).replace('\\', '/')
+
+                with open(LATEST_JSON, "w", encoding="utf-8") as f:
+                    json.dump(payload, f)
+
+                success(f"Sync files ready for Localhost!")
+
+                start_server_thread(sync_dir, HTTP_PORT)
+
+            except Exception as e:
+                error(f"HTTP Sync Failed: {e}")
+
+    elif is_pdf:
+        pdf_path = pdf_files[0]
+        mediainfo_text = get_mediainfo(pdf_path)
+        mediainfo_text = trim_mediainfo_complete_name(mediainfo_text, sync_dir)
+
+        page_count = get_pdf_page_count(pdf_path)
+        if page_count is None:
+            log("PDF page count unavailable; only the first page will be extracted.", "Warn", c.YELLOW)
+        book_info = build_book_info(pdf_path, page_count)
+
+        pages_to_extract = pick_pdf_pages(page_count, sample_count=5)
+        extracted_images = render_pdf_pages(pdf_path, pages_to_extract)
+        cover_url = ""
+        screenshot_urls: list[str] = []
+        cover_local_path: Path | None = None
+
+        if extracted_images:
+            cover_local_path = extracted_images[0]
+            if cover_local_path.parent != sync_dir:
+                hex_suffix = secrets.token_hex(8)  # 8 bytes (16 hex chars, 64 bits of entropy) without overly long filenames
+                staged_cover_path = sync_dir / f"{pdf_path.stem}_cover_{hex_suffix}{cover_local_path.suffix}"
+                try:
+                    shutil.copy(cover_local_path, staged_cover_path)
+                    GENERATED_PDF_IMAGES.append(staged_cover_path)
+                    cover_local_path = staged_cover_path
+                    extracted_images[0] = staged_cover_path
+                except OSError as exc:
+                    error(f"Failed to stage PDF cover image from {cover_local_path} to {staged_cover_path}: {exc}")
+
+            log("Uploading extracted pages...", "Upload")
+            total_pages = len(extracted_images)
+            print_progress(0, total_pages)
+            uploaded_map: dict[int, str] = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=_bounded_workers(total_pages)) as executor:
+                future_to_idx = {executor.submit(upload_image, img): idx for idx, img in enumerate(extracted_images)}
+                done_count = 0
+                for future in concurrent.futures.as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        res = future.result()
+                    except Exception as exc:
+                        error(f"Upload failed for page {idx + 1}: {exc}")
+                        res = None
+                    if res:
+                        uploaded_map[idx] = res
+                    done_count += 1
+                    print_progress(done_count, total_pages)
+
+            cover_entry = uploaded_map.get(0)
+            if cover_entry:
+                cover_url = f"[img]{cover_entry}[/img]"
+            screenshot_urls = []
+            for idx in range(1, total_pages):
+                url = uploaded_map.get(idx)
+                if url:
+                    screenshot_urls.append(url)
+        else:
+            error("No PDF pages extracted; screenshots unavailable.")
+
+        description = generate_pdf_description(book_info, cover_url, screenshot_urls, mediainfo_text)
+        title = build_pdf_title(book_info)
+
+        if not SKIP_TXT:
+            save_name = f"{pdf_path.stem}_TBD_Description.txt"
+            txt_path = pdf_path.parent / save_name
+            txt_path.write_text(description, encoding="utf-8")
+            GENERATED_TXT = txt_path
+            success(f"Saved → {save_name}")
+
+        copy_to_clipboard(description)
+
+        if START_HTTP_SERVER:
+            try:
+                torrent_filename = f"{target_path.name}.torrent"
+                payload = {
+                    "ready": True,
+                    "title": title,
+                    "category": CATEGORY_BOOKS,
+                    "language": "0",
+                    "description": description,
+                    "torrentFile": torrent_filename
+                }
+                if cover_local_path and cover_local_path.exists():
+                    try:
+                        # Use POSIX separators and a relative path; Tampermonkey fetches from http://localhost:8090/<relative_cover_path>
+                        # with HTTP_PORT configured in the settings block and sync_dir served as the web root.
+                        payload["coverFile"] = cover_local_path.relative_to(sync_dir).as_posix()
+                    except ValueError:
+                        error(
+                            f"Cover image '{cover_local_path.resolve()}' is outside sync directory '{sync_dir.resolve()}' while setting coverFile; "
+                            "move it into the target folder (avoid resolving through symlinks) or verify the sync directory before retrying."
+                        )
+                with open(LATEST_JSON, "w", encoding="utf-8") as f:
+                    json.dump(payload, f)
+                success("Sync files ready for Localhost!")
+                start_server_thread(sync_dir, HTTP_PORT)
+            except Exception as e:
+                error(f"HTTP Sync Failed: {e}")
+
+    else:
+        video_for_ss = video_files[0] if video_files else None
+
+        if not video_for_ss: error("No video found!"); return
+
+        mediainfo_text = get_mediainfo(video_for_ss)
+        mediainfo_text = trim_mediainfo_complete_name(mediainfo_text, sync_dir)
+        hdr_dv = needs_hdr10_dv_screenshot(mediainfo_text, video_for_ss.name)
+        screenshots = take_screenshots(video_for_ss, hdr_dv=hdr_dv, count=SCREENSHOT_COUNT)
+
+        uploaded_direct_urls = []
+        if screenshots:
+            print_progress(0, len(screenshots))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=_bounded_workers(len(screenshots))) as executor:
+                futures = {executor.submit(upload_image, img): img for img in screenshots}
+                done_count = 0
+                for future in concurrent.futures.as_completed(futures):
+                    if res := future.result(): uploaded_direct_urls.append(res)
+                    done_count += 1
+                    print_progress(done_count, len(screenshots))
+            if uploaded_direct_urls:
+                success(f"Uploaded {len(uploaded_direct_urls)}/{len(screenshots)} screenshots")
+            else:
+                error("Screenshot upload failed; no URLs returned")
+
+        for f in Path(".").glob("ss_*.*"):
+            try: f.unlink()
+            except: pass
+
+        ss_bbcode = "\n".join([f"[img]{u}[/img]" for u in uploaded_direct_urls])
+        description = f"[center][b][size=5][color=#59E817][font=Segoe UI]MediaInfo[/font][/color][/size][/b][/center][font=Courier New][mediainfo]\n{mediainfo_text}\n[/mediainfo]\n[/font]\n[center][b][size=5][font=Tahoma][color=#59E817]Screenshots[/color][/size][/b]\n[size=2][color=#cddc39]Straight from the source.[/color][/size][/center][/font]\n[center]\n{ss_bbcode}[/center][i][b][center][font=Segoe UI][size=4][color=#FFD700][hr]If you're downloading my torrent and not getting the desired speed, just comment, and I'll move it to my seedbox.[/color][/size][/font][/center][/b][/i]"
+
+        if not SKIP_TXT:
+            save_name = f"{target_path.name}_description.txt" if is_folder else f"{target_path.stem}_TBD_Description.txt"
+            txt_path = target_path.parent / save_name
+            txt_path.write_text(description, encoding="utf-8")
+            GENERATED_TXT = txt_path
+            success(f"Saved → {save_name}")
+
+        copy_to_clipboard(description)
+
+        if START_HTTP_SERVER:
+            try:
+
+                torrent_filename = f"{target_path.name}.torrent"
+                title = format_title_for_metadata(target_path, is_folder, video_for_ss, torrent_filename)
+                category = detect_category(title, mediainfo_text) or "0"
+                language = detect_language(mediainfo_text)
+                payload = {
+                    "ready": True,
+                    "title": title,
+                    "category": category,
+                    "language": language,
+                    "description": description,
+                    "torrentFile": torrent_filename,
+                    "screenshots": uploaded_direct_urls,
+                }
+
+                with open(LATEST_JSON, "w", encoding="utf-8") as f:
+                    json.dump(payload, f)
+
+                success(f"Sync files ready for Localhost!")
+
+                start_server_thread(sync_dir, HTTP_PORT)
+
+            except Exception as e:
+                error(f"HTTP Sync Failed: {e}")
+
+    print(f"\n{c.BOLD}{c.GREEN}ALL DONE!{c.RESET}")
+    print(f"{c.DIM}When you exit, sync files & generated torrents will be deleted.{c.RESET}")
+    input(f"\nPress Enter to exit...")
+
+if __name__ == "__main__":
+    try: main()
+    except KeyboardInterrupt: print(f"\n\n{c.YELLOW}Cancelled.{c.RESET}")
