@@ -111,6 +111,7 @@ GENERATED_TXT = None
 GENERATED_SPECTROGRAM = None
 EXTRACTED_COVER = None
 GENERATED_PDF_IMAGES: list[Path] = []
+INDEX_HTML = None
 
 class c:
     RESET   = '\033[0m'
@@ -235,9 +236,9 @@ button.dl{border-color:#4a8fc0;color:#80b8e0;background:#0a1828}
     <div class="lbl">Title</div>
     <div class="title-box" id="title-box"></div>
     <div class="btns">
-      <button id="b-ct" onclick="copyTitle()">\ud83d\udccb Copy Title</button>
-      <button id="b-si" onclick="searchIMDb()">\ud83d\udd0d Search IMDb</button>
-      <button id="b-ci" onclick="copyIMDb()" disabled>\ud83d\udd17 Copy IMDb URL</button>
+      <button id="b-ct" onclick="copyTitle()">\U0001F4CB Copy Title</button>
+      <button id="b-si" onclick="searchIMDb()">\U0001F50D Search IMDb</button>
+      <button id="b-ci" onclick="copyIMDb()" disabled>\U0001F517 Copy IMDb URL</button>
     </div>
     <div class="imdb-out" id="imdb-out"></div>
   </div>
@@ -246,7 +247,7 @@ button.dl{border-color:#4a8fc0;color:#80b8e0;background:#0a1828}
     <div class="lbl">Description \u00b7 BBCode</div>
     <pre class="desc-box" id="desc-box"></pre>
     <div class="btns">
-      <button id="b-cd" onclick="copyDesc()">\ud83d\udccb Copy Description</button>
+      <button id="b-cd" onclick="copyDesc()">\U0001F4CB Copy Description</button>
     </div>
   </div>
 
@@ -321,11 +322,11 @@ async function searchIMDb(){
       b.textContent='\u2713 Found';b.classList.add('ok');
     }else{
       b.textContent='\u2717 Not found';
-      setTimeout(()=>{b.textContent='\ud83d\udd0d Search IMDb';b.disabled=false;},2000);
+      setTimeout(()=>{b.textContent='\U0001F50D Search IMDb';b.disabled=false;},2000);
     }
   }catch(e){
     b.textContent='\u2717 Error';
-    setTimeout(()=>{b.textContent='\ud83d\udd0d Search IMDb';b.disabled=false;},2000);
+    setTimeout(()=>{b.textContent='\U0001F50D Search IMDb';b.disabled=false;},2000);
   }
 }
 function downloadTorrent(){window.location.href='/api/torrent'}
@@ -446,6 +447,9 @@ def cleanup_sync_files():
 
         if LATEST_JSON and LATEST_JSON.exists():
             LATEST_JSON.unlink()
+
+        if INDEX_HTML and INDEX_HTML.exists():
+            INDEX_HTML.unlink()
 
         if GENERATED_SPECTROGRAM and GENERATED_SPECTROGRAM.exists():
             GENERATED_SPECTROGRAM.unlink()
@@ -1718,15 +1722,21 @@ def format_title_for_metadata(target_path: Path, is_folder: bool, video_path: Pa
 
 def main():
 
-    global LATEST_JSON, GENERATED_TXT, EXTRACTED_COVER
+    global LATEST_JSON, GENERATED_TXT, EXTRACTED_COVER, INDEX_HTML
 
     target_path, is_folder = select_target()
     if not target_path or not target_path.exists(): return
 
     sync_dir = target_path.parent
     LATEST_JSON = sync_dir / "latest.json"
+    INDEX_HTML = sync_dir / "index.html"
 
     if LATEST_JSON.exists(): LATEST_JSON.unlink()
+    if INDEX_HTML.exists(): INDEX_HTML.unlink()
+    try:
+        INDEX_HTML.write_text(_WEBAPP_HTML, encoding='utf-8')
+    except OSError as exc:
+        error(f"Could not write temporary index.html: {exc}")
 
     clear(); banner()
     print(f"{c.BOLD}{c.PURPLE}Selected → {target_path.name}{c.RESET} {'(Folder Mode)' if is_folder else ''}\n")
