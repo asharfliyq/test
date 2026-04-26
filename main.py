@@ -70,7 +70,7 @@ AUTO_DELETE_CREATED_FILES = True
 
 # --- SERVER SETTINGS ---
 START_HTTP_SERVER = True               # True = Start local server for Tampermonkey sync
-HTTP_PORT = 40472                      # Port for the web app (UI + API endpoints)
+HTTP_PORT = 40452                      # Port for the web app (UI + API endpoints)
 # ================================================================
 
 VIDEO_EXTS = {'.mkv', '.mp4', '.avi', '.mov', '.m4v', '.webm', '.flv', '.wmv', '.mpg', '.mpeg', '.ts', '.m2ts'}
