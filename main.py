@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import sys
 import shutil
@@ -17,14 +19,14 @@ except ModuleNotFoundError:
     tk = None
     filedialog = None
 import json
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, parse_qs
 try:
     import PyPDF2  # type: ignore
 except ImportError:
     PyPDF2 = None
 import threading
 import atexit
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from title import generate_title
 
 # ========================= CONFIGURATION =========================
@@ -68,7 +70,7 @@ AUTO_DELETE_CREATED_FILES = True
 
 # --- SERVER SETTINGS ---
 START_HTTP_SERVER = True               # True = Start local server for Tampermonkey sync
-HTTP_PORT = 8090                       # Port for the local server
+HTTP_PORT = 40471                      # Port for the web app (UI + API endpoints)
 # ================================================================
 
 VIDEO_EXTS = {'.mkv', '.mp4', '.avi', '.mov', '.m4v', '.webm', '.flv', '.wmv', '.mpg', '.mpeg', '.ts', '.m2ts'}
@@ -122,24 +124,313 @@ class c:
     GRAY    = '\033[90m'
     WHITE   = '\033[97m'
 
-class CORSRequestHandler(SimpleHTTPRequestHandler):
-    def end_headers(self):
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET')
+def search_imdb(title: str) -> str | None:
+    """Search IMDb for a title and return the URL of the first matching title result.
+
+    Strips common technical release tags (resolution, codec, source, etc.) from
+    the title before searching so that results are more accurate.
+    """
+    clean = re.sub(
+        r'\b(2160p|1080p|720p|480p|4K|UHD|SDR|HDR10?\+?|HLG|DV|DOVI|'
+        r'BluRay|BDRip|BRRip|WEB-DL|WEBRip|HDTC|HDCAM|HDTS|DVDRip|CAM|'
+        r'x265|x264|HEVC|AVC|H\.?265|H\.?264|AV1|AAC|DDP?|DD\+|DTS|TrueHD|'
+        r'FLAC|Opus|REMUX|REPACK|PROPER|EXTENDED|THEATRICAL|DC|IMAX|LIMITED|MULTI|'
+        r'AMZN|NF|DSNP|HMAX|PCOK|SHO|PMTP|ATVP)\b',
+        '', title, flags=re.I
+    )
+    # Use [^\]]* instead of .*? to avoid catastrophic backtracking on bracket content.
+    clean = re.sub(r'\[[^\]]*\]', '', clean)
+    # Use explicit space/tab classes to avoid overlap with \s that can cause ReDoS.
+    clean = re.sub(r'[ \t]*-[ \t]*\S+[ \t]*$', '', clean)
+    clean = re.sub(r'[._]+', ' ', clean)
+    clean = re.sub(r'\s+', ' ', clean).strip(' .-')
+    if not clean:
+        return None
+    try:
+        resp = requests.get(
+            f"https://www.imdb.com/find/?q={quote(clean)}&s=tt",
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
+                "Accept": "text/html,application/xhtml+xml",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            m = re.search(r'href="/title/(tt\d+)/', resp.text)
+            if m:
+                return f"https://www.imdb.com/title/{m.group(1)}/"
+    except Exception as exc:
+        error(f"IMDb search failed for '{clean}': {exc}")
+    return None
+
+_WEBAPP_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>TorrentBD Upload</title>
+<style>
+:root{--bg:#0e0e10;--surface:#18181c;--border:#2c2c34;--text:#e2e2e8;--muted:#6a6a7a;
+  --accent:#7c6ff7;--green:#4ade80;--yellow:#facc15;--r:10px}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+  min-height:100vh;padding:16px;max-width:860px;margin:0 auto}
+header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;
+  padding-bottom:16px;border-bottom:1px solid var(--border);margin-bottom:20px}
+.logo{font-size:1rem;font-weight:700;color:var(--yellow);letter-spacing:.3px}
+.badges{display:flex;gap:6px;flex-wrap:wrap}
+.badge{padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:600;letter-spacing:.4px}
+.cat{background:#1a1a30;color:#9090e0;border:1px solid #2a2a60}
+.lang{background:#0f2010;color:#70c070;border:1px solid #1a4020}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:16px;margin-bottom:14px}
+.lbl{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;
+  color:var(--muted);margin-bottom:10px}
+.title-box{font-size:.9rem;line-height:1.55;word-break:break-word;padding:9px 11px;
+  background:var(--bg);border:1px solid var(--border);border-radius:6px;
+  margin-bottom:11px;color:var(--text)}
+.btns{display:flex;gap:7px;flex-wrap:wrap}
+button{padding:6px 13px;border-radius:6px;border:1px solid var(--border);
+  background:#22222a;color:var(--text);cursor:pointer;font-size:.8rem;font-weight:500;
+  transition:background .12s,color .12s,border-color .12s;white-space:nowrap}
+button:hover:not(:disabled){background:#2a2a36}
+button:active:not(:disabled){transform:scale(.97)}
+button:disabled{opacity:.38;cursor:not-allowed}
+button.ok{border-color:var(--green);color:var(--green);background:#0a1f10}
+button.dl{border-color:#4a8fc0;color:#80b8e0;background:#0a1828}
+.imdb-out{margin-top:9px;font-size:.79rem;color:var(--muted);word-break:break-all}
+.imdb-out a{color:#7ab4f0;text-decoration:none}
+.imdb-out a:hover{text-decoration:underline}
+.desc-box{font-family:'Courier New',monospace;font-size:.75rem;line-height:1.5;
+  white-space:pre-wrap;word-break:break-word;max-height:260px;overflow-y:auto;
+  padding:9px 11px;background:var(--bg);border:1px solid var(--border);
+  border-radius:6px;margin-bottom:11px;color:#b0bac6;
+  scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.torrent-name{font-size:.79rem;color:var(--muted);margin-bottom:9px;word-break:break-all}
+#loading{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:60vh;gap:14px;color:var(--muted);font-size:.88rem}
+.spin{width:26px;height:26px;border:2px solid var(--border);border-top-color:var(--accent);
+  border-radius:50%;animation:sp .7s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.toast{position:fixed;bottom:18px;right:18px;background:#22222a;border:1px solid var(--border);
+  border-radius:8px;padding:8px 16px;font-size:.82rem;color:var(--green);
+  opacity:0;transform:translateY(6px);transition:opacity .18s,transform .18s;
+  pointer-events:none;z-index:9999}
+.toast.show{opacity:1;transform:translateY(0)}
+@media(max-width:480px){.btns{flex-direction:column}button{width:100%}}
+</style>
+</head>
+<body>
+<div id="loading"><div class="spin"></div><span>Waiting for data\u2026</span></div>
+<div id="app" style="display:none">
+  <header>
+    <span class="logo">\u26a1 TorrentBD Lazy Upload</span>
+    <div class="badges">
+      <span class="badge cat" id="cat-badge"></span>
+      <span class="badge lang" id="lang-badge"></span>
+    </div>
+  </header>
+
+  <div class="card">
+    <div class="lbl">Title</div>
+    <div class="title-box" id="title-box"></div>
+    <div class="btns">
+      <button id="b-ct" onclick="copyTitle()">\ud83d\udccb Copy Title</button>
+      <button id="b-si" onclick="searchIMDb()">\ud83d\udd0d Search IMDb</button>
+      <button id="b-ci" onclick="copyIMDb()" disabled>\ud83d\udd17 Copy IMDb URL</button>
+    </div>
+    <div class="imdb-out" id="imdb-out"></div>
+  </div>
+
+  <div class="card">
+    <div class="lbl">Description \u00b7 BBCode</div>
+    <pre class="desc-box" id="desc-box"></pre>
+    <div class="btns">
+      <button id="b-cd" onclick="copyDesc()">\ud83d\udccb Copy Description</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="lbl">Torrent File</div>
+    <div class="torrent-name" id="torrent-name"></div>
+    <div class="btns">
+      <button class="dl" onclick="downloadTorrent()">\u2b07 Download Torrent</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const CAT={
+  "0":"Unknown","1":"DVDRip Movie","4":"CAM Movie","5":"SD TV Episode",
+  "6":"Pro Wrestling","22":"MP3 Music","24":"BluRay Movie","28":"Anime Episode",
+  "36":"Books","41":"SD TV Season","42":"SD BluRay Movie","46":"HDRip Movie",
+  "47":"HD BluRay Movie","55":"HD WEB-DL Movie","61":"HD TV Episode",
+  "62":"HD TV Season","71":"FLAC Music","76":"HD Remux Movie","80":"UHD BluRay Movie",
+  "82":"UHD WEB-DL Movie","83":"WEBRip Movie","84":"UHD TV Episode",
+  "85":"UHD TV Season","86":"UHD Remux Movie"
+};
+const LANG={
+  "0":"Unknown","1":"English","2":"French","3":"Hindi","4":"Urdu","5":"Chinese",
+  "6":"Spanish","7":"Japanese","8":"Bengali","9":"German","10":"Korean",
+  "11":"Telugu","12":"Italian","13":"Russian","14":"Bulgarian","15":"Czech",
+  "16":"Filipino","17":"Hungarian","18":"Arabic","19":"Serbian","20":"Swedish",
+  "21":"Tamil","22":"Turkish","23":"Vietnamese","24":"Danish","25":"Dutch",
+  "26":"Finnish","27":"Greek","28":"Hebrew","30":"Icelandic","31":"Indonesian",
+  "32":"Irish","33":"Malayalam","34":"Marathi","35":"Norwegian","36":"Persian",
+  "37":"Polish","38":"Portuguese","39":"Romanian","40":"Thai","41":"Kannada",
+  "43":"Panjabi"
+};
+let D=null,imdbUrl=null,toastT=null;
+
+function showToast(m){
+  const t=document.getElementById('toast');
+  t.textContent=m;t.classList.add('show');
+  clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove('show'),2000);
+}
+async function cpText(s){
+  try{await navigator.clipboard.writeText(s)}
+  catch(e){
+    const a=document.createElement('textarea');a.value=s;
+    a.style.cssText='position:fixed;opacity:0';document.body.appendChild(a);
+    a.select();document.execCommand('copy');document.body.removeChild(a);
+  }
+}
+function flash(id,txt){
+  const b=document.getElementById(id);if(!b)return;
+  const o=b.textContent;b.textContent=txt;b.classList.add('ok');
+  setTimeout(()=>{b.textContent=o;b.classList.remove('ok')},1500);
+}
+async function copyTitle(){if(!D)return;await cpText(D.title);showToast('\u2713 Title copied');flash('b-ct','\u2713 Copied')}
+async function copyDesc(){
+  if(!D)return;
+  await cpText(D.description);
+  showToast('\u2713 Description copied');flash('b-cd','\u2713 Copied');
+}
+async function copyIMDb(){if(!imdbUrl)return;await cpText(imdbUrl);showToast('\u2713 IMDb URL copied');flash('b-ci','\u2713 Copied')}
+async function searchIMDb(){
+  if(!D)return;
+  const b=document.getElementById('b-si');
+  b.textContent='\u23f3 Searching\u2026';b.disabled=true;
+  try{
+    const r=await fetch('/api/imdb?q='+encodeURIComponent(D.title));
+    const j=await r.json();
+    if(j.url){
+      imdbUrl=j.url;
+      document.getElementById('imdb-out').innerHTML='IMDb: <a href="'+imdbUrl+'" target="_blank">'+imdbUrl+'</a>';
+      document.getElementById('b-ci').disabled=false;
+      b.textContent='\u2713 Found';b.classList.add('ok');
+    }else{
+      b.textContent='\u2717 Not found';
+      setTimeout(()=>{b.textContent='\ud83d\udd0d Search IMDb';b.disabled=false;},2000);
+    }
+  }catch(e){
+    b.textContent='\u2717 Error';
+    setTimeout(()=>{b.textContent='\ud83d\udd0d Search IMDb';b.disabled=false;},2000);
+  }
+}
+function downloadTorrent(){window.location.href='/api/torrent'}
+function render(d){
+  document.getElementById('title-box').textContent=d.title||'';
+  document.getElementById('desc-box').textContent=d.description||'';
+  document.getElementById('torrent-name').textContent=d.torrentFile||'';
+  const c=String(d.category||'0');
+  document.getElementById('cat-badge').textContent=c+' \u00b7 '+(CAT[c]||'Category '+c);
+  const l=String(d.language||'0');
+  document.getElementById('lang-badge').textContent=l+' \u00b7 '+(LANG[l]||'Lang '+l);
+  document.getElementById('loading').style.display='none';
+  document.getElementById('app').style.display='block';
+}
+async function poll(){
+  try{
+    const r=await fetch('/api/data');
+    if(r.ok){const j=await r.json();if(j&&j.ready){D=j;render(j);return;}}
+    setTimeout(poll,2000);
+  }catch(e){setTimeout(poll,2000);}
+}
+poll();
+</script>
+</body>
+</html>"""
+
+
+class WebAppHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        route = parsed.path
+        qs = parsed.query
+
+        if route in ('/', '/index.html'):
+            self._serve_html()
+        elif route == '/api/data':
+            self._serve_data()
+        elif route == '/api/torrent':
+            self._serve_torrent()
+        elif route == '/api/imdb':
+            self._serve_imdb(qs)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def _send_headers(self, content_type: str, length: int | None = None):
+        self.send_response(200)
+        self.send_header('Content-Type', content_type)
         self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate')
-        return super(CORSRequestHandler, self).end_headers()
+        self.send_header('Access-Control-Allow-Origin', '*')
+        if length is not None:
+            self.send_header('Content-Length', str(length))
+        self.end_headers()
+
+    def _serve_html(self):
+        body = _WEBAPP_HTML.encode('utf-8')
+        self._send_headers('text/html; charset=utf-8', len(body))
+        self.wfile.write(body)
+
+    def _serve_data(self):
+        if LATEST_JSON and LATEST_JSON.exists():
+            body = LATEST_JSON.read_bytes()
+            self._send_headers('application/json; charset=utf-8', len(body))
+            self.wfile.write(body)
+        else:
+            body = b'{"ready":false}'
+            self._send_headers('application/json; charset=utf-8', len(body))
+            self.wfile.write(body)
+
+    def _serve_torrent(self):
+        if GENERATED_TORRENT and GENERATED_TORRENT.exists():
+            body = GENERATED_TORRENT.read_bytes()
+            fname = GENERATED_TORRENT.name
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/x-bittorrent')
+            self.send_header('Content-Disposition', f'attachment; filename="{fname}"')
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def _serve_imdb(self, query_string: str):
+        params = parse_qs(query_string)
+        title = params.get('q', [''])[0]
+        imdb_url = search_imdb(title) if title else None
+        body = json.dumps({"url": imdb_url}).encode('utf-8')
+        self._send_headers('application/json; charset=utf-8', len(body))
+        self.wfile.write(body)
 
     def log_message(self, format, *args):
         return
 
-def start_server_thread(directory, port):
+def start_server_thread(port: int):
+    """Start the web app server in a background daemon thread.
+
+    The server listens on *port* and serves the upload assistant web app at ``/``
+    together with API endpoints (``/api/data``, ``/api/torrent``, ``/api/imdb``).
+    """
     def run():
         try:
-            os.chdir(directory)
-            server_address = ('', port)
-            httpd = HTTPServer(server_address, CORSRequestHandler)
-            print(f"\n{c.GREEN}⚡ HTTP Server Running on http://localhost:{port}{c.RESET}")
-            print(f"{c.DIM}   Serving: {directory}{c.RESET}")
+            httpd = HTTPServer(('', port), WebAppHandler)
+            print(f"\n{c.GREEN}⚡ Web App running on http://localhost:{port}{c.RESET}")
             httpd.serve_forever()
         except OSError:
             print(f"\n{c.RED}Error: Port {port} is busy.{c.RESET}")
@@ -1599,7 +1890,7 @@ def main():
 
                 success(f"Sync files ready for Localhost!")
 
-                start_server_thread(sync_dir, HTTP_PORT)
+                start_server_thread(HTTP_PORT)
 
             except Exception as e:
                 error(f"HTTP Sync Failed: {e}")
@@ -1699,7 +1990,7 @@ def main():
                 with open(LATEST_JSON, "w", encoding="utf-8") as f:
                     json.dump(payload, f)
                 success("Sync files ready for Localhost!")
-                start_server_thread(sync_dir, HTTP_PORT)
+                start_server_thread(HTTP_PORT)
             except Exception as e:
                 error(f"HTTP Sync Failed: {e}")
 
@@ -1766,7 +2057,7 @@ def main():
 
                 success(f"Sync files ready for Localhost!")
 
-                start_server_thread(sync_dir, HTTP_PORT)
+                start_server_thread(HTTP_PORT)
 
             except Exception as e:
                 error(f"HTTP Sync Failed: {e}")
