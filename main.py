@@ -595,10 +595,10 @@ def create_torrent(target: Path) -> bool:
     exclude_patterns: list[str] = []
     if target.is_dir():
         # Always exclude metadata/info sidecar files
-        exclude_patterns.extend(["*.nfo", "*.txt"])
+        exclude_patterns.extend(["*.nfo", "*.txt","*.srr"])
 
         # Exclude screens/screen/proof directories and files recursively
-        _exclude_dir_names = {"screens", "screen", "proof", "screenshots", "screenshot"}
+        _exclude_dir_names = {"screens", "screen", "proof", "screenshots", "screenshot", "Sample", "sample"}
         for item in target.rglob("*"):
             lower_name = item.name.lower()
             stem_lower = item.stem.lower()
