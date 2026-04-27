@@ -27,7 +27,7 @@ except ImportError:
 import threading
 import atexit
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from title import generate_title
+from title import generate_title, strip_leading_site_prefix
 
 # ========================= CONFIGURATION =========================
 # --- API Keys ---
@@ -2055,6 +2055,20 @@ def main():
 
     target_path, is_folder = select_target()
     if not target_path or not target_path.exists(): return
+
+    # Rename the file/folder if it starts with a site watermark prefix (e.g. "www.UIndex.org - ").
+    clean_name = strip_leading_site_prefix(target_path.name)
+    if clean_name and clean_name != target_path.name:
+        renamed_path = target_path.parent / clean_name
+        if not renamed_path.exists():
+            try:
+                target_path.rename(renamed_path)
+                log(f"Renamed: '{target_path.name}' → '{clean_name}'", "Rename", c.YELLOW)
+                target_path = renamed_path
+            except OSError as exc:
+                error(f"Could not rename '{target_path.name}': {exc}")
+        else:
+            log(f"Skipping rename – '{clean_name}' already exists in the same directory.", "Rename", c.YELLOW)
 
     sync_dir = target_path.parent
     LATEST_JSON = sync_dir / "latest.json"

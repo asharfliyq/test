@@ -222,7 +222,7 @@ def clean_name(n):
     n = re.sub(r'\.+', '.', n)
     return n.strip('.')
 
-def _strip_leading_site_prefix(name: str) -> str:
+def strip_leading_site_prefix(name: str) -> str:
     """Remove leading site watermark prefixes like ``www.example.org - ``.
 
     Separator support is intentionally conservative and targets common upload
@@ -249,14 +249,14 @@ def _normalize_pahe_suffix(name: str) -> str:
 
 def _title_from_psa_filename(name: str) -> str | None:
     """Return direct title for PSA filenames after basic cleanup, or ``None``."""
-    cleaned = _strip_leading_site_prefix(_strip_video_extension(name)).strip()
+    cleaned = strip_leading_site_prefix(_strip_video_extension(name)).strip()
     if not _PSA_GROUP_SUFFIX_RE.search(cleaned):
         return None
     return cleaned
 
 def _title_from_pahe_filename(name: str) -> str | None:
     """Return direct title for Pahe filenames after basic cleanup, or ``None``."""
-    cleaned = _strip_leading_site_prefix(_strip_video_extension(name)).strip()
+    cleaned = strip_leading_site_prefix(_strip_video_extension(name)).strip()
     if not _PAHE_GROUP_SUFFIX_RE.search(cleaned):
         return None
     return _normalize_pahe_suffix(cleaned).strip()
@@ -806,7 +806,7 @@ def build_name(path):
         # as part of the base name so folder/pack titles don't lose the video codec token when splitext()
         # would otherwise treat them as an extension.
         base, ext = name, ""
-    base = _strip_leading_site_prefix(base)
+    base = strip_leading_site_prefix(base)
     g, v, a = get_mediainfo(path)
 
     group = detect_group(base)
