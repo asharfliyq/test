@@ -626,14 +626,20 @@ def _kill_port_if_busy(port: int) -> None:
     # Port is in use – attempt to free it using OS-appropriate tools.
     freed = False
     if sys.platform == "win32":
-        # Windows: find PID via netstat, then taskkill
+        # Windows: find PID via netstat, then taskkill.
+        # Match the exact local address "0.0.0.0:<port>" or "[::]:<port>" to avoid
+        # substring matches on ports sharing a numeric suffix (e.g., :80 vs :8080).
+        _port_re = re.compile(
+            rf"(?:0\.0\.0\.0|127\.0\.0\.1|\[::\]):{re.escape(str(port))}\s",
+            re.I,
+        )
         try:
             result = subprocess.run(
                 ["netstat", "-ano"],
                 capture_output=True, text=True, check=False, timeout=5,
             )
             for line in result.stdout.splitlines():
-                if f":{port}" in line and "LISTENING" in line:
+                if _port_re.search(line) and "LISTENING" in line:
                     parts = line.strip().split()
                     if parts:
                         pid = parts[-1]
@@ -680,6 +686,7 @@ def _kill_port_if_busy(port: int) -> None:
 
 
 _http_server_started = False
+_http_server_lock = threading.Lock()
 
 
 def start_server_thread(port: int):
@@ -691,13 +698,15 @@ def start_server_thread(port: int):
     If the server is already running in this process, this call is a no-op.
     """
     global _http_server_started
-    if _http_server_started:
-        return
-    _http_server_started = True
+    with _http_server_lock:
+        if _http_server_started:
+            return
+        _http_server_started = True
 
     _kill_port_if_busy(port)
 
     def run():
+        global _http_server_started
         import time as _time
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
@@ -715,6 +724,9 @@ def start_server_thread(port: int):
             except Exception as e:
                 print(f"\n{c.RED}Server error: {e}{c.RESET}")
                 return
+        # All bind attempts failed – reset flag so a future call can retry.
+        with _http_server_lock:
+            _http_server_started = False
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
