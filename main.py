@@ -609,10 +609,12 @@ class WebAppHandler(BaseHTTPRequestHandler):
 def _kill_port_if_busy(port: int) -> None:
     """Kill any process occupying *port* so the server can bind to it.
 
-    Uses ``fuser -k {port}/tcp`` on Linux/macOS.  Silently ignores errors on
-    platforms where ``fuser`` is unavailable (e.g., Windows).
+    Works on Linux (``fuser``), macOS (``lsof`` + ``kill``), and Windows
+    (``netstat`` + ``taskkill``).  Silently ignores errors when the required
+    system tools are unavailable.
     """
     import socket as _socket
+    import time as _time
     try:
         with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
             s.settimeout(0.3)
@@ -620,16 +622,71 @@ def _kill_port_if_busy(port: int) -> None:
                 return  # Port is free
     except OSError:
         return
-    # Port is in use – attempt to free it
-    try:
-        subprocess.run(
-            ["fuser", "-k", f"{port}/tcp"],
-            capture_output=True, check=False, timeout=5,
+
+    # Port is in use – attempt to free it using OS-appropriate tools.
+    freed = False
+    if sys.platform == "win32":
+        # Windows: find PID via netstat, then taskkill.
+        # Match the exact local address "0.0.0.0:<port>" or "[::]:<port>" to avoid
+        # substring matches on ports sharing a numeric suffix (e.g., :80 vs :8080).
+        _port_re = re.compile(
+            rf"(?:0\.0\.0\.0|127\.0\.0\.1|\[::\]):{re.escape(str(port))}\s",
+            re.I,
         )
-        import time as _time
-        _time.sleep(0.4)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+            for line in result.stdout.splitlines():
+                if _port_re.search(line) and "LISTENING" in line:
+                    parts = line.strip().split()
+                    if parts:
+                        pid = parts[-1]
+                        subprocess.run(
+                            ["taskkill", "/PID", pid, "/F"],
+                            capture_output=True, check=False, timeout=5,
+                        )
+                        freed = True
+                        break
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+    else:
+        # Linux: try fuser first
+        try:
+            subprocess.run(
+                ["fuser", "-k", f"{port}/tcp"],
+                capture_output=True, check=False, timeout=5,
+            )
+            freed = True
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+
+        if not freed:
+            # macOS / systems without fuser: use lsof
+            try:
+                result = subprocess.run(
+                    ["lsof", "-ti", f"tcp:{port}"],
+                    capture_output=True, text=True, check=False, timeout=5,
+                )
+                pids = result.stdout.strip().splitlines()
+                for pid in pids:
+                    pid = pid.strip()
+                    if pid.isdigit():
+                        subprocess.run(
+                            ["kill", "-9", pid],
+                            capture_output=True, check=False, timeout=5,
+                        )
+                        freed = True
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass
+
+    if freed:
+        _time.sleep(0.5)
+
+
+_http_server_started = False
+_http_server_lock = threading.Lock()
 
 
 def start_server_thread(port: int):
@@ -637,20 +694,39 @@ def start_server_thread(port: int):
 
     The server listens on *port* and serves the upload assistant web app at ``/``
     together with API endpoints (``/api/data``, ``/api/torrent``, ``/api/imdb``,
-    ``/api/cover``).  If the port is already occupied it is freed with
-    ``fuser -k`` before binding.
+    ``/api/cover``).  If the port is already occupied it is freed before binding.
+    If the server is already running in this process, this call is a no-op.
     """
+    global _http_server_started
+    with _http_server_lock:
+        if _http_server_started:
+            return
+        _http_server_started = True
+
     _kill_port_if_busy(port)
 
     def run():
-        try:
-            httpd = HTTPServer(('', port), WebAppHandler)
-            print(f"\n{c.GREEN}⚡ Web App running on http://localhost:{port}{c.RESET}")
-            httpd.serve_forever()
-        except OSError:
-            print(f"\n{c.RED}Error: Port {port} is busy.{c.RESET}")
-        except Exception as e:
-            print(f"\n{c.RED}Server error: {e}{c.RESET}")
+        global _http_server_started
+        import time as _time
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                httpd = HTTPServer(('', port), WebAppHandler)
+                print(f"\n{c.GREEN}⚡ Web App running on http://localhost:{port}{c.RESET}")
+                httpd.serve_forever()
+                return
+            except OSError:
+                if attempt < max_attempts:
+                    _time.sleep(0.5 * attempt)
+                    _kill_port_if_busy(port)
+                else:
+                    print(f"\n{c.RED}Error: Port {port} is busy.{c.RESET}")
+            except Exception as e:
+                print(f"\n{c.RED}Server error: {e}{c.RESET}")
+                return
+        # All bind attempts failed – reset flag so a future call can retry.
+        with _http_server_lock:
+            _http_server_started = False
 
     t = threading.Thread(target=run, daemon=True)
     t.start()

@@ -922,12 +922,11 @@ def build_name(path):
 
         parts.append(show)
         parts.append(f"S{season}E{episode_num}")
-        if existing_title:
+        title = episode_title(show, season, _ep_lookup)
+        if title:
+            parts.append(title)
+        elif existing_title:
             parts.append(existing_title)
-        else:
-            title = episode_title(show, season, _ep_lookup)
-            if title:
-                parts.append(title)
     else:
 
         year_match = re.search(r"(19|20)\d{2}", base)
