@@ -194,13 +194,17 @@ _IMDB_CLEAN_RE = re.compile(
     re.I,
 )
 
+# Pre-compiled pattern for detecting "sample" as a word boundary in file stems
+# (e.g., "movie.sample" or "sample_video" match; "resample" does not).
+_STEM_SAMPLE_RE = re.compile(r'(?:^|[^a-zA-Z])sample(?:[^a-zA-Z]|$)', re.I)
+
 def _clean_title_for_imdb(title: str) -> str:
     """Strip technical release tags from *title* to produce a clean IMDb search query."""
     clean = _IMDB_CLEAN_RE.sub('', title)
     # Limit bracket content length to avoid slow backtracking on malformed input.
     clean = re.sub(r'\[[^\]]{0,300}\]', '', clean)
-    # Require at least one non-space before the dash to avoid over-stripping.
-    clean = re.sub(r'(?<=\S)[ \t]+-[ \t]+\S+[ \t]*$', '', clean)
+    # Strip trailing " - GroupName" suffix; anchor to end without trailing-space greediness.
+    clean = re.sub(r'(?<=\S)[ \t]+-[ \t]+\S+$', '', clean)
     clean = re.sub(r'[._]+', ' ', clean)
     return re.sub(r'\s+', ' ', clean).strip(' .-')
 
@@ -459,7 +463,9 @@ async function doImdbSearch(q){
       else{imgEl.style.visibility='hidden';}
       const info=document.createElement('div');info.className='iinfo';
       const b=document.createElement('b');b.textContent=item.title||'';
-      const sm=document.createElement('small');sm.textContent=(item.year||'')+'\u00b7'+(item.type||'');
+      const sm=document.createElement('small');
+      const meta=[item.year,item.type].filter(Boolean).join(' \u00b7 ');
+      sm.textContent=meta;
       info.appendChild(b);info.appendChild(sm);
       div.appendChild(imgEl);div.appendChild(info);
       div.onclick=()=>selectImdbResult(item);
@@ -749,7 +755,7 @@ def create_torrent(target: Path) -> bool:
                 pattern = f"{rel}/**"
                 if pattern not in exclude_patterns:
                     exclude_patterns.append(pattern)
-            elif item.is_file() and (bool(re.search(r'(?:^|[^a-zA-Z])sample(?:[^a-zA-Z]|$)', stem_lower)) or stem_lower in _exclude_dir_names):
+            elif item.is_file() and (_STEM_SAMPLE_RE.search(stem_lower) or stem_lower in _exclude_dir_names):
                 if rel not in exclude_patterns:
                     exclude_patterns.append(rel)
 
