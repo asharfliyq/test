@@ -1002,12 +1002,10 @@ def build_name(path):
     # and an x265 encoder tag, this is a WEBRip re-encode.  Override effective_web
     # so that downstream codec normalisation uses encoder names (x265), and replace
     # any WEB-DL entry already added to parts with WEBRip.
-    hevc_and_x265_in_filename = (
-        hevc_format_match
-        and video_from_filename
-        and video
-        and video.upper() == "X265"
-    )
+    # Check x265 presence separately: `video` may have captured "HEVC" (the first regex
+    # match in the string) rather than "x265" when HEVC precedes x265 in the filename.
+    x265_in_filename = bool(re.search(r'(?<![A-Za-z0-9])x265(?![A-Za-z0-9])', base, re.I))
+    hevc_and_x265_in_filename = bool(hevc_format_match) and x265_in_filename
     if hevc_and_x265_in_filename and effective_web != "WEBRip" and not explicit_non_web_source:
         if "WEB-DL" in parts:
             parts[parts.index("WEB-DL")] = "WEBRip"

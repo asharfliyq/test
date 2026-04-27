@@ -185,6 +185,75 @@ def search_imdb(title: str) -> str | None:
         error(f"IMDb search fallback failed for '{clean}': {exc}")
     return None
 
+_IMDB_CLEAN_RE = re.compile(
+    r'\b(2160p|1080p|720p|480p|4K|UHD|SDR|HDR10?\+?|HLG|DV|DOVI|'
+    r'BluRay|BDRip|BRRip|WEB-DL|WEBRip|HDTC|HDCAM|HDTS|DVDRip|CAM|'
+    r'x265|x264|HEVC|AVC|H\.?265|H\.?264|AV1|AAC|DDP?|DD\+|DTS|TrueHD|'
+    r'FLAC|Opus|REMUX|REPACK|PROPER|EXTENDED|THEATRICAL|DC|IMAX|LIMITED|MULTI|'
+    r'AMZN|NF|DSNP|HMAX|PCOK|SHO|PMTP|ATVP)\b',
+    re.I,
+)
+
+# Pre-compiled pattern for detecting "sample" as a word boundary in file stems
+# (e.g., "movie.sample" or "sample_video" match; "resample" does not).
+_STEM_SAMPLE_RE = re.compile(r'(?:^|[^a-zA-Z])sample(?:[^a-zA-Z]|$)', re.I)
+
+def _clean_title_for_imdb(title: str) -> str:
+    """Strip technical release tags from *title* to produce a clean IMDb search query."""
+    clean = _IMDB_CLEAN_RE.sub('', title)
+    # Limit bracket content length to avoid slow backtracking on malformed input.
+    clean = re.sub(r'\[[^\]]{0,300}\]', '', clean)
+    # Strip trailing " - GroupName" suffix; anchor to end without trailing-space greediness.
+    clean = re.sub(r'(?<=\S)[ \t]+-[ \t]+\S+$', '', clean)
+    clean = re.sub(r'[._]+', ' ', clean)
+    return re.sub(r'\s+', ' ', clean).strip(' .-')
+
+_IMDB_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+def search_imdb_multi(title: str) -> list[dict]:
+    """Search IMDb and return up to ~8 candidate results.
+
+    Uses the same IMDb suggestion API as the Tampermonkey user script so results
+    are identical to what the modal popup would show.  Each dict contains:
+    ``id``, ``title``, ``year``, ``type``, and ``poster`` (URL string or empty).
+    Returns an empty list on failure.
+    """
+    clean = _clean_title_for_imdb(title)
+    if not clean:
+        return []
+    try:
+        first_char = clean[0].lower()
+        resp = requests.get(
+            f"https://v3.sg.media-imdb.com/suggestion/{first_char}/{quote(clean)}.json",
+            headers=_IMDB_HEADERS,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            items = resp.json().get('d') or []
+            results = []
+            for item in items:
+                if not item.get('id'):
+                    continue
+                poster = ""
+                img = item.get('i')
+                if isinstance(img, dict):
+                    poster = img.get('imageUrl', '')
+                results.append({
+                    'id': item['id'],
+                    'title': item.get('l', ''),
+                    'year': item.get('y') or '',
+                    'type': item.get('q', ''),
+                    'poster': poster,
+                })
+            return results
+    except Exception as exc:
+        error(f"IMDb multi-search failed for '{clean}': {exc}")
+    return []
+
 _WEBAPP_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -239,6 +308,27 @@ button.dl{border-color:#4a8fc0;color:#80b8e0;background:#0a1828}
   pointer-events:none;z-index:9999}
 .toast.show{opacity:1;transform:translateY(0)}
 @media(max-width:480px){.btns{flex-direction:column}button{width:100%}}
+#imdb-overlay{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:10000;display:none;backdrop-filter:blur(2px)}
+#imdb-overlay.show{display:block}
+#imdb-modal{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  width:min(450px,95vw);background:#1e293b;border:1px solid #334155;border-radius:12px;
+  z-index:10001;padding:20px;display:none;flex-direction:column;max-height:85vh;
+  box-shadow:0 25px 50px -12px rgba(0,0,0,.8)}
+#imdb-modal.show{display:flex}
+#imdb-search-inp{width:100%;background:#0f172a;border:1px solid #334155;color:#fff;
+  padding:12px;border-radius:8px;font-size:15px;outline:none;margin-bottom:10px;
+  box-sizing:border-box}
+#imdb-search-inp:focus{border-color:#38bdf8}
+#imdb-results-list{overflow-y:auto;flex-grow:1;max-height:60vh}
+#imdb-results-list::-webkit-scrollbar{width:6px}
+#imdb-results-list::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}
+.imdb-item{display:flex;padding:12px;cursor:pointer;border-bottom:1px solid #334155;
+  align-items:center;border-radius:6px;gap:0}
+.imdb-item:hover{background:#334155}
+.imdb-item img{width:40px;height:56px;margin-right:15px;object-fit:cover;
+  border-radius:4px;background:#000;flex-shrink:0}
+.imdb-item .iinfo b{color:#e2e2e8;display:block}
+.imdb-item .iinfo small{color:#64748b}
 </style>
 </head>
 <body>
@@ -279,6 +369,15 @@ button.dl{border-color:#4a8fc0;color:#80b8e0;background:#0a1828}
       <button class="dl" onclick="downloadTorrent()">\u2b07 Download Torrent</button>
     </div>
   </div>
+</div>
+<div id="imdb-overlay" onclick="closeImdbModal()"></div>
+<div id="imdb-modal">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px">
+    <span style="font-weight:700;color:#f5c518;font-size:16px">&#127916; IMDb Search</span>
+    <span onclick="closeImdbModal()" style="cursor:pointer;color:#94a3b8;font-size:20px">&#x2715;</span>
+  </div>
+  <input type="text" id="imdb-search-inp" placeholder="Type title to search\u2026" autocomplete="off">
+  <div id="imdb-results-list"></div>
 </div>
 <div class="toast" id="toast"></div>
 <script>
@@ -329,27 +428,63 @@ async function copyDesc(){
   showToast('\u2713 Description copied');flash('b-cd','\u2713 Copied');
 }
 async function copyIMDb(){if(!imdbUrl)return;await cpText(imdbUrl);showToast('\u2713 IMDb URL copied');flash('b-ci','\u2713 Copied')}
-async function searchIMDb(){
-  if(!D)return;
-  const b=document.getElementById('b-si');
-  b.textContent='\u23f3 Searching\u2026';b.disabled=true;
-  try{
-    const r=await fetch('/api/imdb?q='+encodeURIComponent(D.title));
-    const j=await r.json();
-    if(j.url){
-      imdbUrl=j.url;
-      document.getElementById('imdb-out').innerHTML='IMDb: <a href="'+imdbUrl+'" target="_blank">'+imdbUrl+'</a>';
-      document.getElementById('b-ci').disabled=false;
-      b.textContent='\u2713 Found';b.classList.add('ok');
-    }else{
-      b.textContent='\u2717 Not found';
-      setTimeout(()=>{b.textContent='\U0001F50D Search IMDb';b.disabled=false;},2000);
-    }
-  }catch(e){
-    b.textContent='\u2717 Error';
-    setTimeout(()=>{b.textContent='\U0001F50D Search IMDb';b.disabled=false;},2000);
+let imdbSearchTimer=null;
+function openImdbModal(){
+  const overlay=document.getElementById('imdb-overlay');
+  const modal=document.getElementById('imdb-modal');
+  overlay.classList.add('show');modal.classList.add('show');
+  const inp=document.getElementById('imdb-search-inp');
+  inp.focus();
+  if(D&&D.title&&!inp.value){
+    const q=D.title.replace(/(\\.|--|-|\\s)(2160p|1080p|720p|S\\d+|E\\d+|WEB[- ]DL|WEBRip|BluRay).*/i,'')
+      .replace(/[._-]/g,' ').trim();
+    inp.value=q;doImdbSearch(q);
   }
 }
+function closeImdbModal(){
+  document.getElementById('imdb-overlay').classList.remove('show');
+  document.getElementById('imdb-modal').classList.remove('show');
+}
+async function doImdbSearch(q){
+  if(!q||q.length<2)return;
+  const res=document.getElementById('imdb-results-list');
+  res.innerHTML='<div style="color:#64748b;padding:12px">\u23f3 Searching\u2026</div>';
+  try{
+    const r=await fetch('/api/imdb_search?q='+encodeURIComponent(q));
+    const j=await r.json();
+    res.innerHTML='';
+    if(!j.results||!j.results.length){
+      res.innerHTML='<div style="color:#64748b;padding:12px">No results found</div>';return;
+    }
+    j.results.forEach(item=>{
+      const div=document.createElement('div');div.className='imdb-item';
+      const imgEl=document.createElement('img');
+      if(item.poster){imgEl.src=item.poster;imgEl.onerror=function(){this.style.visibility='hidden';};}
+      else{imgEl.style.visibility='hidden';}
+      const info=document.createElement('div');info.className='iinfo';
+      const b=document.createElement('b');b.textContent=item.title||'';
+      const sm=document.createElement('small');
+      const meta=[item.year,item.type].filter(Boolean).join(' \u00b7 ');
+      sm.textContent=meta;
+      info.appendChild(b);info.appendChild(sm);
+      div.appendChild(imgEl);div.appendChild(info);
+      div.onclick=()=>selectImdbResult(item);
+      res.appendChild(div);
+    });
+  }catch(e){res.innerHTML='<div style="color:#ef4444;padding:12px">Search error</div>';}
+}
+function selectImdbResult(item){
+  imdbUrl='https://www.imdb.com/title/'+item.id+'/';
+  document.getElementById('imdb-out').innerHTML='IMDb: <a href="'+imdbUrl+'" target="_blank">'+imdbUrl+'</a>';
+  document.getElementById('b-ci').disabled=false;
+  closeImdbModal();
+  showToast('\u2713 IMDb selected');
+}
+function searchIMDb(){if(!D)return;openImdbModal();}
+document.getElementById('imdb-search-inp').addEventListener('input',function(e){
+  clearTimeout(imdbSearchTimer);
+  imdbSearchTimer=setTimeout(()=>doImdbSearch(e.target.value),400);
+});
 function downloadTorrent(){window.location.href='/api/torrent'}
 function render(d){
   document.getElementById('title-box').textContent=d.title||'';
@@ -391,6 +526,8 @@ class WebAppHandler(BaseHTTPRequestHandler):
             self._serve_cover()
         elif route == '/api/imdb':
             self._serve_imdb(qs)
+        elif route == '/api/imdb_search':
+            self._serve_imdb_search(qs)
         else:
             self.send_response(404)
             self.end_headers()
@@ -455,6 +592,14 @@ class WebAppHandler(BaseHTTPRequestHandler):
         title = params.get('q', [''])[0]
         imdb_url = search_imdb(title) if title else None
         body = json.dumps({"url": imdb_url}).encode('utf-8')
+        self._send_headers('application/json; charset=utf-8', len(body))
+        self.wfile.write(body)
+
+    def _serve_imdb_search(self, query_string: str):
+        params = parse_qs(query_string)
+        title = params.get('q', [''])[0]
+        results = search_imdb_multi(title) if title else []
+        body = json.dumps({"results": results}).encode('utf-8')
         self._send_headers('application/json; charset=utf-8', len(body))
         self.wfile.write(body)
 
@@ -610,7 +755,7 @@ def create_torrent(target: Path) -> bool:
                 pattern = f"{rel}/**"
                 if pattern not in exclude_patterns:
                     exclude_patterns.append(pattern)
-            elif item.is_file() and stem_lower in _exclude_dir_names:
+            elif item.is_file() and (_STEM_SAMPLE_RE.search(stem_lower) or stem_lower in _exclude_dir_names):
                 if rel not in exclude_patterns:
                     exclude_patterns.append(rel)
 
