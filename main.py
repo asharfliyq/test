@@ -246,28 +246,22 @@ _WEBAPP_HTML = """<!DOCTYPE html>
 <title>TorrentBD Upload</title>
 <style>
 :root{--bg:#0e0e10;--surface:#18181c;--border:#2c2c34;--text:#e2e2e8;--muted:#6a6a7a;
-  --accent:#7c6ff7;--green:#4ade80;--yellow:#facc15;--r:10px;--sb:148px}
+  --accent:#7c6ff7;--green:#4ade80;--yellow:#facc15;--r:10px}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
-  min-height:100vh;padding:16px 16px 16px calc(var(--sb) + 20px);max-width:calc(860px + var(--sb) + 20px);margin:0 auto}
-#sidebar{position:fixed;left:0;top:0;bottom:0;width:var(--sb);background:var(--surface);
-  border-right:1px solid var(--border);padding:14px 10px;display:flex;flex-direction:column;
-  gap:12px;overflow:hidden;z-index:50}
-.sb-head{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;
-  color:var(--yellow);padding-bottom:6px;border-bottom:1px solid var(--border)}
-.sb-item{display:flex;flex-direction:column;gap:4px}
-.sb-lbl{font-size:.63rem;color:var(--muted);display:flex;justify-content:space-between;align-items:center}
-.sb-pct{font-size:.63rem;color:var(--text);font-weight:600}
-.sb-bar{height:5px;background:var(--border);border-radius:3px;overflow:hidden}
-.sb-fill{height:100%;border-radius:3px;width:0%;transition:width .5s ease}
-.sb-val{font-size:.58rem;color:var(--muted)}
-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;
-  padding-bottom:16px;border-bottom:1px solid var(--border);margin-bottom:20px}
-.logo{font-size:clamp(.7rem,1.8vw,1rem);font-weight:700;color:var(--yellow);letter-spacing:.3px;flex:1;text-align:center}
-.badges{display:flex;gap:6px;flex-wrap:wrap}
+  min-height:100vh;padding:16px;max-width:900px;margin:0 auto}
+header{display:flex;flex-direction:column;align-items:center;gap:8px;
+  padding-bottom:16px;border-bottom:1px solid var(--border);margin-bottom:20px;text-align:center}
+.logo{font-size:clamp(.85rem,2.5vw,1.1rem);font-weight:700;color:var(--yellow);letter-spacing:.3px}
+.header-row{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:100%}
+.badges{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
 .badge{padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:600;letter-spacing:.4px}
 .cat{background:#1a1a30;color:#9090e0;border:1px solid #2a2a60}
 .lang{background:#0f2010;color:#70c070;border:1px solid #1a4020}
+.stat-pills{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
+.stat-pill{padding:3px 10px;border-radius:20px;font-size:.7rem;font-weight:600;letter-spacing:.4px}
+.stat-pill.disk{background:#1a1020;color:#c084fc;border:1px solid #4c1d95}
+.stat-pill.bw{background:#0a1828;color:#7dd3fc;border:1px solid #0c4a6e}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:16px;margin-bottom:14px}
 .lbl{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;
   color:var(--muted);margin-bottom:10px}
@@ -302,11 +296,6 @@ button.dl{border-color:#4a8fc0;color:#80b8e0;background:#0a1828}
   opacity:0;transform:translateY(6px);transition:opacity .18s,transform .18s;
   pointer-events:none;z-index:9999}
 .toast.show{opacity:1;transform:translateY(0)}
-@media(max-width:600px){
-  :root{--sb:0px}
-  #sidebar{display:none}
-  body{padding-left:16px}
-}
 @media(max-width:480px){.btns{flex-direction:column}button{width:100%}}
 #imdb-overlay{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:10000;display:none;backdrop-filter:blur(2px)}
 #imdb-overlay.show{display:block}
@@ -332,31 +321,19 @@ button.dl{border-color:#4a8fc0;color:#80b8e0;background:#0a1828}
 </style>
 </head>
 <body>
-<div id="sidebar">
-  <div class="sb-head">\u26a1 System</div>
-  <div class="sb-item">
-    <div class="sb-lbl"><span>CPU</span><span class="sb-pct" id="cpu-pct">--%</span></div>
-    <div class="sb-bar"><div class="sb-fill" id="cpu-fill" style="background:var(--accent)"></div></div>
-  </div>
-  <div class="sb-item">
-    <div class="sb-lbl"><span>RAM</span><span class="sb-pct" id="ram-pct">--%</span></div>
-    <div class="sb-bar"><div class="sb-fill" id="ram-fill" style="background:var(--green)"></div></div>
-    <div class="sb-val" id="ram-val"></div>
-  </div>
-  <div class="sb-item">
-    <div class="sb-lbl"><span>Disk</span><span class="sb-pct" id="disk-pct">--%</span></div>
-    <div class="sb-bar"><div class="sb-fill" id="disk-fill" style="background:var(--yellow)"></div></div>
-    <div class="sb-val" id="disk-val"></div>
-  </div>
-</div>
 <div id="loading"><div class="spin"></div><span>Waiting for data\u2026</span></div>
 <div id="app" style="display:none">
   <header>
-    <div style="flex:1"></div>
     <span class="logo">\u26a1 TorrentBD Lazy Upload</span>
-    <div class="badges" style="flex:1;justify-content:flex-end;display:flex;gap:6px;flex-wrap:wrap">
-      <span class="badge cat" id="cat-badge"></span>
-      <span class="badge lang" id="lang-badge"></span>
+    <div class="header-row">
+      <div class="badges">
+        <span class="badge cat" id="cat-badge"></span>
+        <span class="badge lang" id="lang-badge"></span>
+      </div>
+      <div class="stat-pills" id="stat-pills">
+        <span class="stat-pill disk" id="stat-disk">\U0001F4BE Disk: -- GB</span>
+        <span class="stat-pill bw" id="stat-bw">\U0001F4E1 BW: -- TiB</span>
+      </div>
     </div>
   </header>
 
@@ -521,34 +498,18 @@ async function poll(){
     setTimeout(poll,2000);
   }catch(e){setTimeout(poll,2000);}
 }
-function fmtBytes(b){
-  if(b>=1e9)return(b/1e9).toFixed(1)+' GB';
-  return(b/1e6).toFixed(0)+' MB';
-}
-async function pollSys(){
+async function fetchAppStats(){
   try{
-    const r=await fetch('/api/sysinfo');
+    const r=await fetch('/api/appstats');
     if(r.ok){
       const j=await r.json();
-      const cpu=j.cpu||0;
-      document.getElementById('cpu-fill').style.width=cpu+'%';
-      document.getElementById('cpu-pct').textContent=cpu.toFixed(1)+'%';
-      const ri=j.ram_used||0,rt=j.ram_total||1;
-      const rp=(ri/rt*100);
-      document.getElementById('ram-fill').style.width=rp.toFixed(1)+'%';
-      document.getElementById('ram-pct').textContent=rp.toFixed(0)+'%';
-      document.getElementById('ram-val').textContent=fmtBytes(ri)+' / '+fmtBytes(rt);
-      const di=j.disk_used||0,dt=j.disk_total||1;
-      const dp=(di/dt*100);
-      document.getElementById('disk-fill').style.width=dp.toFixed(1)+'%';
-      document.getElementById('disk-pct').textContent=dp.toFixed(0)+'%';
-      document.getElementById('disk-val').textContent=fmtBytes(di)+' / '+fmtBytes(dt);
+      if(j.disk_gb!=null)document.getElementById('stat-disk').textContent='\U0001F4BE Disk: '+j.disk_gb+' GB';
+      if(j.bw_tib!=null)document.getElementById('stat-bw').textContent='\U0001F4E1 BW: '+j.bw_tib+' TiB';
     }
   }catch(e){}
-  setTimeout(pollSys,2000);
 }
 poll();
-pollSys();
+fetchAppStats();
 </script>
 </body>
 </html>"""
@@ -572,6 +533,8 @@ class WebAppHandler(BaseHTTPRequestHandler):
             self._serve_imdb(qs)
         elif route == '/api/imdb_search':
             self._serve_imdb_search(qs)
+        elif route == '/api/appstats':
+            self._serve_appstats()
         elif route == '/api/sysinfo':
             self._serve_sysinfo()
         else:
@@ -656,6 +619,11 @@ class WebAppHandler(BaseHTTPRequestHandler):
         self._send_headers('application/json; charset=utf-8', len(body))
         self.wfile.write(body)
 
+    def _serve_appstats(self):
+        body = json.dumps(_app_stats_cache).encode('utf-8')
+        self._send_headers('application/json; charset=utf-8', len(body))
+        self.wfile.write(body)
+
     def log_message(self, format, *args):
         return
 
@@ -700,6 +668,50 @@ _http_server_lock = threading.Lock()
 _sysinfo_cache: dict = {'cpu': 0.0, 'ram_used': 0, 'ram_total': 0, 'disk_used': 0, 'disk_total': 0}
 _sysinfo_lock = threading.Lock()
 _cpu_prev_stat: tuple | None = None
+
+_app_stats_cache: dict = {'disk_gb': None, 'bw_tib': None}
+
+
+def _fetch_app_stats() -> None:
+    """Run ``app-stats show`` and populate _app_stats_cache with the latest
+    disk (GB) and bandwidth (TiB) values."""
+    try:
+        result = subprocess.run(
+            ['app-stats', 'show'],
+            capture_output=True, text=True, timeout=30,
+        )
+        output = result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return
+
+    def _latest_value(section_header: str) -> int | None:
+        in_section = False
+        last_val: int | None = None
+        for line in output.splitlines():
+            if section_header in line:
+                in_section = True
+                continue
+            if in_section:
+                if line.startswith('***'):
+                    break
+                parts = line.split()
+                if len(parts) >= 3:
+                    try:
+                        last_val = int(parts[2])
+                    except ValueError:
+                        pass
+        return last_val
+
+    disk_gb = _latest_value('disk stats')
+    traffic_gb = _latest_value('traffic stats')
+
+    bw_tib: float | None = None
+    if traffic_gb is not None:
+        bw_tib = round(traffic_gb / 1024, 2)
+
+    _app_stats_cache['disk_gb'] = disk_gb
+    _app_stats_cache['bw_tib'] = bw_tib
+
 
 def _read_proc_stat() -> tuple[int, int]:
     with open('/proc/stat', 'r') as f:
@@ -778,6 +790,9 @@ def start_server_thread(port: int):
     if sys.platform == "linux":
         _si_thread = threading.Thread(target=_update_sysinfo_loop, daemon=True, name="sysinfo")
         _si_thread.start()
+
+    _stats_thread = threading.Thread(target=_fetch_app_stats, daemon=True, name="appstats")
+    _stats_thread.start()
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
