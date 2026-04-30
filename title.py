@@ -140,7 +140,6 @@ _PAHE_GROUP_SUFFIX_RE = re.compile(
 _PSA_GROUP_SUFFIX_RE = re.compile(r"(?i)-\s*PSA\s*(?:[\]\)\}]+)?$")
 
 def _strip_ordinal_season_phrase(text, pattern):
-    """Remove matched ordinal season phrase and collapse extra spaces."""
     return MULTIPLE_SPACES_RE.sub(" ", pattern.sub("", text)).strip()
 
 ANILIST_API_URL = "https://graphql.anilist.co"
@@ -149,7 +148,6 @@ _AUDIO_LANGUAGE_CACHE: OrderedDict[str, list[str]] = OrderedDict()
 _AUDIO_LANGUAGE_CACHE_LIMIT = 256
 
 def get_mediainfo(path):
-    """Run ``mediainfo --Output=JSON`` and return (general, video, audio) dicts."""
     try:
         r = subprocess.run(
             ["mediainfo", "--Output=JSON", path],
@@ -187,7 +185,6 @@ def get_mediainfo(path):
         return None, None, None
 
 def _safe_int(val, default=0):
-    """Convert *val* to int, returning *default* on failure."""
     try:
         s = str(val).split("/")[0].strip()
 
@@ -199,14 +196,12 @@ def _safe_int(val, default=0):
         return default
 
 def _safe_float(val, default=0.0):
-    """Convert *val* to float, returning *default* on failure."""
     try:
         return float(str(val).split("/")[0].strip())
     except (ValueError, TypeError, AttributeError):
         return default
 
 def _normalize_channel_layout(val: str) -> str:
-    """Normalize channel layout fragments like ``7 1``/``7.1`` to ``7.1``."""
     digits = re.findall(r"\d", str(val))
     if len(digits) >= 2:
         return f"{digits[0]}.{digits[1]}"
@@ -220,11 +215,6 @@ def clean_name(n):
     return n.strip('.')
 
 def strip_leading_site_prefix(name: str) -> str:
-    """Remove leading site watermark prefixes like ``www.example.org - ``.
-
-    Separator support is intentionally conservative and targets common upload
-    watermark formats (`-`, `:`, `|`, and Unicode dash variants).
-    """
     return re.sub(
         r"^\s*(?:https?://)?www\.(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}\s*[-–—:|]\s*",
         "",
@@ -234,41 +224,27 @@ def strip_leading_site_prefix(name: str) -> str:
     )
 
 def _strip_video_extension(name: str) -> str:
-    """Remove known video extension from *name*."""
     base, ext = os.path.splitext(name)
     if ext.lower() in VIDEO_EXT and base:
         return base
     return name
 
 def _normalize_pahe_suffix(name: str) -> str:
-    """Normalize Pahe group suffix variants like ``-Pahe.in``/``-Pahe in`` to ``-Pahe``."""
     return _PAHE_GROUP_SUFFIX_RE.sub("-Pahe", name)
 
 def _title_from_psa_filename(name: str) -> str | None:
-    """Return direct title for PSA filenames after basic cleanup, or ``None``."""
     cleaned = strip_leading_site_prefix(_strip_video_extension(name)).strip()
     if not _PSA_GROUP_SUFFIX_RE.search(cleaned):
         return None
     return cleaned
 
 def _title_from_pahe_filename(name: str) -> str | None:
-    """Return direct title for Pahe filenames after basic cleanup, or ``None``."""
     cleaned = strip_leading_site_prefix(_strip_video_extension(name)).strip()
     if not _PAHE_GROUP_SUFFIX_RE.search(cleaned):
         return None
     return _normalize_pahe_suffix(cleaned).strip()
 
 def _extract_edition_text(after_year: str) -> str | None:
-    """Extract edition/variant text that appears after the year but before tags.
-
-    Args:
-        after_year: The substring following the detected year in the filename.
-                    May include delimiters and technical tags.
-    Returns:
-        A cleaned edition string with dot separators (e.g., ``Open.Matte``),
-        as produced by ``clean_name()``, or ``None`` if no edition-like text
-        is present.
-    """
     if not after_year:
         return None
     stripped = after_year.lstrip(_EDITION_LEADING_CHARS)
@@ -286,16 +262,9 @@ def _strip_parenthesized_year(text):
     return re.sub(r"\((?:19|20)\d{2}\)", "", text)
 
 def _is_interlaced(scan_type):
-    """Return True when *scan_type* indicates interlaced content (MBAFF, Interlaced, etc.)."""
     return bool(scan_type) and str(scan_type).upper() != "PROGRESSIVE"
 
 def resolution(width, scan_type=None):
-    """Return a resolution tag like ``1080p`` or ``1080i``.
-
-    *scan_type* accepts the ``ScanType`` value from a MediaInfo video track
-    (e.g. ``"Progressive"``, ``"Interlaced"``, ``"MBAFF"``).  Any non-progressive
-    value (MBAFF or Interlaced) causes the suffix to be ``i`` instead of ``p``.
-    """
     w = _safe_int(width)
     if w == 0:
         return None
@@ -325,11 +294,6 @@ def video_codec(v):
     return fmt if fmt else None
 
 def detect_hdr(v):
-    """Return an HDR tag string or None.
-
-    Uses bit depth, colour primaries, transfer characteristics and
-    Dolby Vision metadata to determine the dynamic-range format.
-    """
     if not v:
         return None
 
@@ -356,11 +320,6 @@ def detect_hdr(v):
     return ".".join(tags) if tags else None
 
 def audio_info(a):
-    """Build scene-style audio tag from mediainfo audio track dict.
-
-    Uses codec format, channels, Atmos metadata, bit depth and bit rate
-    to produce tags like ``DDP5.1.Atmos``, ``AAC2.0``, ``TrueHD.Atmos``.
-    """
     if not a:
         return None
     codec = a.get("Format")
@@ -451,11 +410,6 @@ def detect_group(name):
     return candidate
 
 def detect_source_tags_filename(name):
-    """Returns (service_tag, web_tag) found in the filename.
-
-    A standalone ``WEB`` token is kept as ``WEB`` so the final WEB type
-    (``WEB-DL`` vs ``WEBRip``) can be resolved from MediaInfo metadata.
-    """
     webtypes = ["WEB-DL", "WEBRip", "BluRay", "REMUX", "HDTV", "WEB"]
     service = None
     webtype = None
@@ -474,7 +428,6 @@ def detect_source_tags_filename(name):
     return service, webtype
 
 def detect_source_mediainfo(g, v):
-    """Search General+Video metadata text for streaming service identifiers."""
     text = str(g) + str(v)
     for pat, vtag in _SOURCE_PATTERNS:
         if pat.search(text):
@@ -482,7 +435,6 @@ def detect_source_mediainfo(g, v):
     return None
 
 def _collect_encoding_text(g, v):
-    """Gather all encoding-related metadata fields into a single string."""
     fields = []
     if v:
         for key in ("Encoded_Library", "Encoded_Library_Name",
@@ -495,12 +447,9 @@ def _collect_encoding_text(g, v):
     return " ".join(fields)
 
 def _has_reencode_signature(encoding_text):
-    """Return True if encoding text contains known re-encode tool names."""
     return bool(_REENCODE_RE.search(encoding_text))
 
 def _video_bitrate_low_for_resolution(v, res):
-    """Return True if the video bit rate is suspiciously low for its resolution,
-    which is a strong indicator of a WEBRip (re-encode)."""
     if not v or not res:
         return False
 
@@ -513,18 +462,6 @@ def _video_bitrate_low_for_resolution(v, res):
     return False
 
 def detect_web_type_mediainfo(g, v, a=None):
-    """Detect web source type (WEBRip or WEB-DL) from mediainfo metadata.
-
-    Uses multiple signals:
-    1. Streaming-service identifier in metadata → WEB-DL
-    2. Re-encode tool signatures (x264, x265, HandBrake, FFmpeg …) → WEBRip
-    3. Video bit rate compared to resolution-based thresholds → WEBRip hint
-    4. Video bit depth: 8-bit HEVC at high resolution is unusual for WEB-DL
-    5. Audio codec: AAC audio on content that should be DDP hints at WEBRip
-       (services deliver DDP 5.1; re-encoders often transcode to AAC)
-
-    Returns a ``(service_tag, web_tag)`` tuple where either may be ``None``.
-    """
     service = detect_source_mediainfo(g, v)
     encoding_text = _collect_encoding_text(g, v)
 
@@ -590,12 +527,6 @@ def detect_episode(name):
     return (None, None)
 
 def episode_title(show, season, episode):
-    """Fetch episode title from TVMaze API.
-
-    Dots / underscores in *show* are replaced with spaces so the search
-    query is cleaner (e.g. ``The.Rookie`` → ``The Rookie``).  Season and
-    episode numbers are cast to int so leading zeros don't confuse the API.
-    """
     query = show.replace(".", " ").replace("_", " ").strip()
     fallback_query = re.sub(r"\b(?:19|20)\d{2}\b$", "", query).strip()
     queries = [query]
@@ -683,7 +614,6 @@ def _matching_anilist_results(title, results):
 
 
 def anime_english_title(title):
-    """Return English title from AniList when available and different."""
     try:
         results = _anilist_search(title)
         if not results:
@@ -706,11 +636,6 @@ def anime_english_title(title):
         return None
 
 def _normalize_video_codec(video, web_tag):
-    """Adjust video codec notation based on web type.
-
-    WEBRip (re-encode) uses encoder names: x264 / x265
-    WEB-DL (direct download) uses format names: H.264 / H.265
-    """
     if not video or not web_tag:
         return video
     upper = video.upper().replace(".", "")
@@ -729,7 +654,6 @@ def _normalize_video_codec(video, web_tag):
     return video
 
 def _dedupe_preserve_order(items: list[str]) -> list[str]:
-    """Return items with duplicates removed while preserving order."""
     seen: set[str] = set()
     result: list[str] = []
     for item in items:
@@ -739,15 +663,6 @@ def _dedupe_preserve_order(items: list[str]) -> list[str]:
     return result
 
 def _collect_audio_languages(path: str | None, *sources) -> list[str]:
-    """Collect audio languages (lowercased) from mediainfo tracks before deduplicating and returning.
-
-    Args:
-        path: Optional file path string used to look up cached language lists.
-        *sources: MediaInfo track dictionaries that may contain language metadata.
-
-    Returns:
-        A deduplicated list of lowercased language codes, preserving the order of appearance.
-    """
     langs: list[str] = []
     if path:
         cached = _AUDIO_LANGUAGE_CACHE.get(path)
@@ -775,14 +690,6 @@ def _collect_audio_languages(path: str | None, *sources) -> list[str]:
     return _dedupe_preserve_order(langs)
 
 def _has_multiple_audio_languages(audio_languages: list[str]) -> bool:
-    """Return True when multiple distinct audio languages are present.
-
-    Args:
-        audio_languages: Lowercased, deduplicated language codes.
-
-    Returns:
-        True when more than one distinct language is present; otherwise False.
-    """
     return len(audio_languages) > 1
 
 def build_name(path, is_season_pack=False):
@@ -1060,7 +967,6 @@ def build_name(path, is_season_pack=False):
 
 
 def _reorder_audio_hdr_tokens(core: str) -> str:
-    """Ensure audio tokens precede HDR tokens, keeping other tags stable."""
 
     core = re.sub(
         rf"(?i)(^|\.)(?P<hdr>{_HDR_BLOCK_PATTERN})\.(?P<audio>{_AUDIO_BLOCK_PATTERN})(?=\.|$)",
@@ -1121,11 +1027,6 @@ def _reorder_audio_hdr_tokens(core: str) -> str:
 
 
 def build_title(new_name):
-    """Convert a scene-formatted filename into a human-readable title.
-
-    Strips the file extension and replaces **all** dots with spaces so the
-    title contains no dots at all (e.g. ``H 264``, ``DDP5 1``).
-    """
     _, ext = os.path.splitext(new_name)
     base = new_name[:-len(ext)] if ext.lower() in VIDEO_EXT else new_name
 
@@ -1150,11 +1051,6 @@ def build_title(new_name):
     return base
 
 def detect_fansub(name):
-    """Detect fansub-style filename and return parsed info dict, or ``None``.
-
-    Handles formats like ``[SubsPlease] Title - 22 (1080p) [817B9AE4].mkv``
-    and ``[SubsPlease] Title - E22 (1080p) [817B9AE4].mkv``.
-    """
     base = os.path.splitext(name)[0]
     m = _FANSUB_RE.match(base)
     if not m:
@@ -1174,15 +1070,6 @@ def detect_fansub(name):
     }
 
 def anime_season_episode(title, absolute_episode):
-    """Look up anime season/episode from an absolute episode number.
-
-    Uses the AniList GraphQL API to find the anime and its sequel chain,
-    then maps the absolute episode to the correct season and relative
-    episode number.
-
-    Returns ``(season, episode)`` tuple.  Falls back to ``(1, absolute_episode)``
-    when the API is unavailable or the anime is not found.
-    """
     try:
         results = _anilist_search(title)
         if not results:
@@ -1204,12 +1091,6 @@ def anime_season_episode(title, absolute_episode):
         return 1, absolute_episode
 
 def _build_fansub_title(path, fansub_info, is_pack=False):
-    """Build a human-readable title for a fansub-format file.
-
-    Combines anime API season/episode lookup with mediainfo-derived codec
-    details and TVMaze episode titles to produce a title like:
-    ``Hime-sama Goumon no Jikan desu S02E08 Episode Title 1080p WEB-DL AAC 2.0 H.264 - SubsPlease``
-    """
     group = fansub_info["group"]
     title = fansub_info["title"]
     absolute_ep = fansub_info["episode"]
@@ -1351,30 +1232,6 @@ def _build_fansub_title(path, fansub_info, is_pack=False):
     return result
 
 def generate_title(path, is_pack=False, is_season_pack=False):
-    """Generate a human-readable title for any video file.
-
-    Dispatch order:
-
-    1. **PSA** – filenames ending in ``-PSA`` (or with a ``www.UIndex.org``
-       prefix): strips the site prefix and video extension, returns the
-       cleaned filename as-is (preserving token casing and dots/spaces).
-    2. **Pahe** – filenames ending in ``-Pahe.in`` / ``-Pahe in`` (or with
-       a ``www.UIndex.org`` prefix): same prefix/extension stripping, plus
-       normalises the trailing TLD suffix to plain ``-Pahe``.
-    3. **Fansub** files (``[Group] Title - Ep …``) → anime API lookup +
-       mediainfo.
-    4. **Scene-format** files → ``build_name()`` → ``build_title()``.
-
-    The original file is **never** renamed; only the title string is produced.
-
-    When *is_pack* is ``True`` (the file is part of a multi-episode pack),
-    the per-episode subtitle is omitted from the result.
-
-    When *is_season_pack* is ``True``, the file is treated as a representative
-    episode from a season pack: MediaInfo is read from the file for accurate
-    audio/video tags, but the episode number and episode title are omitted so
-    the result is a season-level title (e.g. ``Show S01 1080p WEB-DL …``).
-    """
     name = os.path.basename(path)
 
     psa_title = _title_from_psa_filename(name)

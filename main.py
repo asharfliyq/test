@@ -127,13 +127,6 @@ class c:
     WHITE   = '\033[97m'
 
 def search_imdb(title: str) -> str | None:
-    """Search IMDb for a title and return the URL of the first matching title result.
-
-    Strips common technical release tags (resolution, codec, source, etc.) from
-    the title before searching so that results are more accurate.
-    Uses the IMDb suggestion API (same endpoint as the Tampermonkey UI) and falls
-    back to HTML scraping when the suggestion API is unavailable.
-    """
     clean = re.sub(
         r'\b(2160p|1080p|720p|480p|4K|UHD|SDR|HDR10?\+?|HLG|DV|DOVI|'
         r'BluRay|BDRip|BRRip|WEB-DL|WEBRip|HDTC|HDCAM|HDTS|DVDRip|CAM|'
@@ -198,7 +191,6 @@ _IMDB_CLEAN_RE = re.compile(
 _STEM_SAMPLE_RE = re.compile(r'(?:^|[^a-zA-Z])sample(?:[^a-zA-Z]|$)', re.I)
 
 def _clean_title_for_imdb(title: str) -> str:
-    """Strip technical release tags from *title* to produce a clean IMDb search query."""
     clean = _IMDB_CLEAN_RE.sub('', title)
 
     clean = re.sub(r'\[[^\]]{0,300}\]', '', clean)
@@ -214,13 +206,6 @@ _IMDB_HEADERS = {
 }
 
 def search_imdb_multi(title: str) -> list[dict]:
-    """Search IMDb and return up to ~8 candidate results.
-
-    Uses the same IMDb suggestion API as the Tampermonkey user script so results
-    are identical to what the modal popup would show.  Each dict contains:
-    ``id``, ``title``, ``year``, ``type``, and ``poster`` (URL string or empty).
-    Returns an empty list on failure.
-    """
     clean = _clean_title_for_imdb(title)
     if not clean:
         return []
@@ -681,11 +666,6 @@ class WebAppHandler(BaseHTTPRequestHandler):
         super().handle_error(request, client_address)
 
 def _kill_port_if_busy(port: int) -> None:
-    """Kill any process occupying *port* so the server can bind to it.
-
-    Uses ``fuser`` on Linux only.  Silently ignores errors when the required
-    system tools are unavailable.
-    """
     import socket as _socket
     import time as _time
     try:
@@ -765,13 +745,6 @@ def _update_sysinfo_loop() -> None:
 
 
 def start_server_thread(port: int):
-    """Start the web app server in a background daemon thread.
-
-    The server listens on *port* and serves the upload assistant web app at ``/``
-    together with API endpoints (``/api/data``, ``/api/torrent``, ``/api/imdb``,
-    ``/api/cover``).  If the port is already occupied it is freed before binding.
-    If the server is already running in this process, this call is a no-op.
-    """
     global _http_server_started
     with _http_server_lock:
         if _http_server_started:
@@ -810,7 +783,6 @@ def start_server_thread(port: int):
     t.start()
 
 def cleanup_sync_files():
-    """Deletes sync files and optionally generated files on exit"""
     try:
 
         if LATEST_JSON and LATEST_JSON.exists():
@@ -849,13 +821,6 @@ SLOT_CAMERA  = 1
 SLOT_UPLOAD  = 2
 
 class _LiveProgress:
-    """Thread-safe multi-line live progress display using ANSI escape codes.
-
-    Each "slot" occupies one line.  Slots are rendered in ascending slot-id
-    order and the cursor is always kept one line below the last slot so that
-    normal print() calls (e.g. log messages) push the block downward cleanly.
-    Falls back to plain printing when stdout is not a TTY.
-    """
 
     def __init__(self) -> None:
         self._lock   = threading.Lock()
@@ -865,7 +830,6 @@ class _LiveProgress:
 
 
     def begin(self, slot: int, text: str = "") -> None:
-        """Activate a new slot and print its initial line."""
         with self._lock:
             if slot in self._slots:
                 return
@@ -880,7 +844,6 @@ class _LiveProgress:
                 print(text)
 
     def update(self, slot: int, text: str) -> None:
-        """Update a slot's text and redraw all active slots in place."""
         with self._lock:
             if slot not in self._slots:
                 return
@@ -896,7 +859,6 @@ class _LiveProgress:
             sys.stdout.flush()
 
     def end(self, slot: int) -> None:
-        """Remove a slot from the live display."""
         with self._lock:
             if slot not in self._slots:
                 return
@@ -922,7 +884,6 @@ class _LiveProgress:
                 sys.stdout.flush()
 
     def log(self, text: str) -> None:
-        """Print a log line, pushing it above the active progress area."""
         with self._lock:
             if not _SUPPORTS_LIVE or self._nlines == 0:
                 sys.stdout.write(f"{text}\n")
@@ -1207,15 +1168,6 @@ def find_cover_image(folder: Path) -> Path | None:
 _FAKINGTHEFUNK_NAMES = frozenset({"fakingthefunk.jpg", "fakingthefunk.png", "fakingthefunk.jpeg"})
 
 def find_fakingthefunk_image(search_root: Path) -> Path | None:
-    """Search *search_root* (recursively) for a fakingthefunk proof image.
-
-    Looks for a file named ``fakingthefunk.jpg``, ``fakingthefunk.png``, or
-    ``fakingthefunk.jpeg`` anywhere inside the folder tree.  This covers both
-    regular album folders and discography roots where the image may live inside
-    a sub-album directory.
-
-    Returns the path to the first match found, or ``None`` if absent.
-    """
     if search_root.is_file():
         return None
     for candidate in search_root.rglob("*"):
@@ -1224,19 +1176,6 @@ def find_fakingthefunk_image(search_root: Path) -> Path | None:
     return None
 
 def extract_cover_from_audio(audio_files: list[Path], dest_dir: Path) -> Path | None:
-    """Try to extract embedded cover art from audio files using ffmpeg.
-
-    Iterates through audio_files in order and attempts to extract an attached
-    image stream from each file.  The extracted image is written to
-    dest_dir/extracted_cover.jpg.
-
-    Args:
-        audio_files: List of audio file paths to try, in priority order.
-        dest_dir:    Directory where the extracted cover will be saved.
-
-    Returns:
-        Path to the extracted cover image, or None if no embedded cover found.
-    """
     if not shutil.which("ffmpeg"):
         return None
     out_path = dest_dir / "extracted_cover.jpg"
@@ -1256,11 +1195,6 @@ def extract_cover_from_audio(audio_files: list[Path], dest_dir: Path) -> Path | 
     return None
 
 def select_representative_audio_file(audio_files: list[Path], base_dir: Path | None = None) -> Path:
-    """Pick a representative audio file for metadata/spectrogram generation.
-
-    For nested audio folders (e.g., discography roots), prefer the top-level
-    release bucket with the most tracks instead of always taking the first file.
-    """
     if not audio_files:
         raise ValueError("audio_files cannot be empty")
 
@@ -1436,11 +1370,6 @@ _HDR_DV_REGEX = re.compile(
 )
 
 def needs_hdr10_dv_screenshot(mediainfo_text: str = "", file_name: str = "") -> bool:
-    """Return True when the media appears to be Dolby Vision or HDR10/10+.
-
-    Checks for common HDR/DV markers in either the mediainfo text or filename
-    (e.g., 'Dolby Vision', 'DVHE.07', '.DV.', 'HDR10', 'HDR 10+').
-    """
     return bool(_HDR_DV_REGEX.search(file_name) or _HDR_DV_REGEX.search(mediainfo_text))
 
 def _build_screenshot_cmd(video: Path, timestamp: float, output_file: Path, hdr_dv: bool, crop: str | None = None) -> list[str]:
@@ -1457,7 +1386,6 @@ def _build_screenshot_cmd(video: Path, timestamp: float, output_file: Path, hdr_
 
 
 def _detect_crop(video: Path, timestamp: float) -> str | None:
-    """Detect crop parameters for a single frame to remove black bars."""
     try:
 
 
@@ -1563,11 +1491,6 @@ def _parse_upload_error_message(data: dict) -> str:
     return "unknown error"
 
 def _upload_via_host(img: Path, host: str, timeout: int = UPLOAD_TIMEOUT) -> tuple[str | None, bool]:
-    """Upload a single image to a given host.
-
-    Returns a tuple of (direct_url, fatal_error). fatal_error is True for non-retriable
-    file errors (e.g., missing/locked files) so the caller can skip host fallbacks.
-    """
     filename = img.name
     try:
         if host == "imgbb":
@@ -1616,11 +1539,6 @@ def _upload_via_host(img: Path, host: str, timeout: int = UPLOAD_TIMEOUT) -> tup
     return None, False
 
 def upload_image(img: Path) -> str | None:
-    """Upload an image using the preferred host with a single fallback.
-
-    If IMAGE_HOST is unsupported, the function defaults to imgbb then freeimage.
-    Retries are skipped when _upload_via_host reports a fatal (file) error.
-    """
     primary = _DEPRECATED_HOST_ALIASES.get(IMAGE_HOST.lower(), IMAGE_HOST.lower())
     supported_hosts = ("imgbb", "freeimage")
     if primary not in supported_hosts:
@@ -1651,12 +1569,6 @@ def print_progress(done: int, total: int):
         _lp.update(SLOT_UPLOAD, text)
 
 def _bounded_workers(total_items: int) -> int:
-    """Return a conservative worker count for I/O-bound uploads.
-
-    Uses the MIN_IO_WORKERS/IO_WORKER_MULTIPLIER tuning for upload tasks and caps
-    workers by the configured limit, the items to process, and a modest scaling
-    factor to avoid spawning more threads than the workload can use.
-    """
     cpu_count = os.cpu_count() or 1
     max_io_workers = max(MIN_IO_WORKERS, cpu_count * IO_WORKER_MULTIPLIER)
     return max(1, min(MAX_CONCURRENT_UPLOADS, total_items, max_io_workers))
@@ -1744,7 +1656,6 @@ def detect_language(mediainfo_text: str) -> str:
 _SAMPLE_DIR_NAMES = {"sample", "samples"}
 
 def _is_sample_file(path: Path, base_dir: Path | None = None) -> bool:
-    """Return True if *path* is a sample file or lives inside a sample sub-directory."""
     if _STEM_SAMPLE_RE.search(path.stem.lower()):
         return True
     check = path.parent
@@ -1764,7 +1675,6 @@ def sort_paths_by_mtime(paths: list[Path]) -> list[Path]:
     return sorted(paths, key=lambda p: (mtimes[p], p.name.lower()))
 
 def trim_mediainfo_complete_name(mediainfo_text: str, base_dir: Path) -> str:
-    """Remove selected base directory prefix from MediaInfo 'Complete name' paths."""
     prefix = str(base_dir)
     prefix_posix = prefix.replace("\\", "/").rstrip("/") + "/"
     prefix_windows = prefix.replace("/", "\\").rstrip("\\") + "\\"
@@ -1903,7 +1813,6 @@ def _extract_edition_from_text(text: str) -> tuple[str | None, str]:
 
 
 def parse_pdf_filename(filename: str) -> dict:
-    """Extract a best-effort title/author/edition/isbn from a PDF filename."""
     stem = Path(filename).stem
     cleaned = re.sub(r'[._]+', ' ', stem)
     cleaned = re.sub(r'\s+', ' ', cleaned).strip(" -._")
@@ -2069,7 +1978,6 @@ def get_pdf_page_count(pdf_path: Path) -> int | None:
 
 
 def pick_pdf_pages(page_count: int | None, sample_count: int = 5) -> list[int]:
-    """Pick preview pages for images; distributes selections evenly for consistency."""
     pages = [1]
     if page_count and page_count > 1:
         take = min(sample_count, page_count - 1)
