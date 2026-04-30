@@ -2138,6 +2138,8 @@ def main():
 
     # Start torrent creation in a background thread so it overlaps with
     # mediainfo, screenshot, and upload work below.
+    # daemon=True ensures the thread is killed on KeyboardInterrupt or early return
+    # rather than blocking the process; the normal path always joins explicitly below.
     _torrent_result: list[bool] = [False]
     def _torrent_worker():
         _torrent_result[0] = create_torrent(target_path, _srt_include)
@@ -2479,10 +2481,14 @@ def main():
 
     # Wait for background torrent thread to complete before finishing.
     _torrent_thread.join()
-    if not _torrent_result[0] and CREATE_TORRENT_FILE:
+    _torrent_ok = _torrent_result[0]
+    if not _torrent_ok and CREATE_TORRENT_FILE:
         error("Torrent creation failed!")
 
-    print(f"\n{c.BOLD}{c.GREEN}ALL DONE!{c.RESET}")
+    if _torrent_ok or not CREATE_TORRENT_FILE:
+        print(f"\n{c.BOLD}{c.GREEN}ALL DONE!{c.RESET}")
+    else:
+        print(f"\n{c.BOLD}{c.YELLOW}DONE (torrent creation failed — description still copied to clipboard).{c.RESET}")
     print(f"{c.DIM}When you exit, sync files & generated torrents will be deleted.{c.RESET}")
     input(f"\nPress Enter to exit...")
 
