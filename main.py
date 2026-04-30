@@ -718,6 +718,104 @@ def cleanup_sync_files():
 
 atexit.register(cleanup_sync_files)
 
+# ── Live multi-line progress display ─────────────────────────────────────────
+_SUPPORTS_LIVE = sys.stdout.isatty()
+
+SLOT_TORRENT = 0
+SLOT_CAMERA  = 1
+SLOT_UPLOAD  = 2
+
+class _LiveProgress:
+    """Thread-safe multi-line live progress display using ANSI escape codes.
+
+    Each "slot" occupies one line.  Slots are rendered in ascending slot-id
+    order and the cursor is always kept one line below the last slot so that
+    normal print() calls (e.g. log messages) push the block downward cleanly.
+    Falls back to plain printing when stdout is not a TTY.
+    """
+
+    def __init__(self) -> None:
+        self._lock   = threading.Lock()
+        self._slots: dict[int, str] = {}
+        self._order: list[int]      = []
+        self._nlines: int           = 0
+
+    # ── public API ───────────────────────────────────────────────────────────
+
+    def begin(self, slot: int, text: str = "") -> None:
+        """Activate a new slot and print its initial line."""
+        with self._lock:
+            if slot in self._slots:
+                return
+            self._slots[slot] = text
+            self._order.append(slot)
+            self._order.sort()
+            self._nlines = len(self._order)
+            if _SUPPORTS_LIVE:
+                sys.stdout.write(f"\r\033[K{text}\n")
+                sys.stdout.flush()
+            else:
+                print(text)
+
+    def update(self, slot: int, text: str) -> None:
+        """Update a slot's text and redraw all active slots in place."""
+        with self._lock:
+            if slot not in self._slots:
+                return
+            self._slots[slot] = text
+            if not _SUPPORTS_LIVE:
+                return
+            n = self._nlines
+            if n == 0:
+                return
+            sys.stdout.write(f"\033[{n}A")
+            for s in self._order:
+                sys.stdout.write(f"\r\033[K{self._slots[s]}\n")
+            sys.stdout.flush()
+
+    def end(self, slot: int) -> None:
+        """Remove a slot from the live display."""
+        with self._lock:
+            if slot not in self._slots:
+                return
+            old_count = len(self._order)
+            del self._slots[slot]
+            self._order.remove(slot)
+            new_count = len(self._order)
+            self._nlines = new_count
+            if not _SUPPORTS_LIVE:
+                return
+            if old_count > 0:
+                sys.stdout.write(f"\033[{old_count}A")
+                for s in self._order:
+                    sys.stdout.write(f"\r\033[K{self._slots[s]}\n")
+                # Clear extra lines; do NOT advance past the last one so the
+                # cursor stays at nlines+1 below the start of the block.
+                extras = old_count - new_count
+                for i in range(extras):
+                    if i < extras - 1:
+                        sys.stdout.write(f"\r\033[K\n")
+                    else:
+                        sys.stdout.write(f"\r\033[K")
+                sys.stdout.flush()
+
+    def log(self, text: str) -> None:
+        """Print a log line, pushing it above the active progress area."""
+        with self._lock:
+            if not _SUPPORTS_LIVE or self._nlines == 0:
+                sys.stdout.write(f"{text}\n")
+                sys.stdout.flush()
+                return
+            n = self._nlines
+            sys.stdout.write(f"\033[{n}A")
+            sys.stdout.write(f"\r\033[K{text}\n")
+            for s in self._order:
+                sys.stdout.write(f"\r\033[K{self._slots[s]}\n")
+            sys.stdout.flush()
+
+_lp = _LiveProgress()
+# ─────────────────────────────────────────────────────────────────────────────
+
 def clear(): os.system('cls' if os.name == 'nt' else 'clear')
 
 def banner():
@@ -732,7 +830,7 @@ def banner():
 
 def log(msg: str, icon: str = "•", color: str = c.CYAN):
     t = datetime.now().strftime("%H:%M:%S")
-    print(f"{color}[{t}] {icon} {msg}{c.RESET}")
+    _lp.log(f"{color}[{t}] {icon} {msg}{c.RESET}")
 
 def success(msg): log(msg, "Success", c.GREEN)
 def error(msg):   log(msg, "Error", c.RED)
@@ -823,29 +921,32 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
     _pct_re = re.compile(r'(\d+)\s*%')
     _last_pct = -1
 
-    def _print_torrent_bar(pct: int) -> None:
+    def _bar_text(pct: int) -> str:
         bar_length = 10
         filled = int(bar_length * pct // 100)
         bar = "█" * filled + "▒" * (bar_length - filled)
-        print(f"\r{c.CYAN}Creating torrent... [{bar}] {pct}%{c.RESET}", end="", flush=True)
+        return f"{c.CYAN}Creating torrent... [{bar}] {pct}%{c.RESET}"
 
-    while True:
-        line = process.stdout.readline()
-        if not line and process.poll() is not None:
-            break
-        if line:
-            line = line.strip()
-            m = _pct_re.search(line)
-            if m:
-                pct = min(int(m.group(1)), 100)
-                if pct != _last_pct:
-                    _print_torrent_bar(pct)
-                    _last_pct = pct
-            elif "Wrote" in line:
-                _print_torrent_bar(100)
-                _last_pct = 100
+    _lp.begin(SLOT_TORRENT, _bar_text(0))
+    try:
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
+            if line:
+                line = line.strip()
+                m = _pct_re.search(line)
+                if m:
+                    pct = min(int(m.group(1)), 100)
+                    if pct != _last_pct:
+                        _lp.update(SLOT_TORRENT, _bar_text(pct))
+                        _last_pct = pct
+                elif "Wrote" in line:
+                    _lp.update(SLOT_TORRENT, _bar_text(100))
+                    _last_pct = 100
+    finally:
+        _lp.end(SLOT_TORRENT)
 
-    print()
     returncode = process.wait()
 
     if returncode == 0 and out.exists():
@@ -1296,31 +1397,37 @@ def take_screenshots(video: Path, hdr_dv: bool, count: int = SCREENSHOT_COUNT) -
         first_timestamp = _timestamp(first_progress)
         crop = _detect_crop(video, first_timestamp)
 
-    for i in range(1, count + 1):
-        progress = i / (count + 1)
-        timestamp = _timestamp(progress)
-        ext = "png" if LOSSLESS_SCREENSHOT else "jpg"
-        output_file = Path(f"ss_{i:02d}.{ext}")
+    def _ss_bar_text(done: int) -> str:
+        bar_length = 10
+        filled = int(bar_length * done // count) if count else bar_length
+        bar = "█" * filled + "▒" * (bar_length - filled)
+        return f"{c.CYAN}Taking screenshots... [{bar}] {done}/{count}{c.RESET}"
 
-        cmd = _build_screenshot_cmd(video, timestamp, output_file, hdr_dv, crop=crop)
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hide_window())
+    _lp.begin(SLOT_CAMERA, _ss_bar_text(0))
+    try:
+        for i in range(1, count + 1):
+            progress = i / (count + 1)
+            timestamp = _timestamp(progress)
+            ext = "png" if LOSSLESS_SCREENSHOT else "jpg"
+            output_file = Path(f"ss_{i:02d}.{ext}")
 
-        if output_file.exists():
-            size_mb = output_file.stat().st_size / (1024 * 1024)
-            if LOSSLESS_SCREENSHOT and ext == "png" and size_mb > max_size_mb:
-                output_file.unlink()
-                jpeg_file = Path(f"ss_{i:02d}.jpg")
-                cmd_jpg = _build_screenshot_cmd(video, timestamp, jpeg_file, hdr_dv, crop=crop)
-                subprocess.run(cmd_jpg, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hide_window())
-                if jpeg_file.exists():
-                    files.append(jpeg_file)
-                    print(f"   {c.YELLOW}Success {i}/{count} → JPEG (PNG too big){c.RESET}")
-                continue
-            files.append(output_file)
-            fmt = "PNG" if ext == "png" else "JPG"
-            print(f"   {c.GREEN}Success {i}/{count} → {fmt} ({size_mb:.1f} MB){c.RESET}")
-        else:
-            print(f"   {c.RED}Failed {i}/{count}{c.RESET}")
+            cmd = _build_screenshot_cmd(video, timestamp, output_file, hdr_dv, crop=crop)
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hide_window())
+
+            if output_file.exists():
+                size_mb = output_file.stat().st_size / (1024 * 1024)
+                if LOSSLESS_SCREENSHOT and ext == "png" and size_mb > max_size_mb:
+                    output_file.unlink()
+                    jpeg_file = Path(f"ss_{i:02d}.jpg")
+                    cmd_jpg = _build_screenshot_cmd(video, timestamp, jpeg_file, hdr_dv, crop=crop)
+                    subprocess.run(cmd_jpg, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hide_window())
+                    if jpeg_file.exists():
+                        files.append(jpeg_file)
+                else:
+                    files.append(output_file)
+            _lp.update(SLOT_CAMERA, _ss_bar_text(i))
+    finally:
+        _lp.end(SLOT_CAMERA)
     return files
 
 def _parse_upload_error_message(data: dict) -> str:
@@ -1404,22 +1511,22 @@ def upload_image(img: Path) -> str | None:
     for idx, host in enumerate(hosts):
         url, fatal = _upload_via_host(img, host)
         if url:
-            if idx > 0:
-                success(f"Fallback upload via {host} succeeded for {img.name}")
             return url
         if fatal:
             break
-        if idx < len(hosts) - 1:
-            next_host = hosts[idx + 1]
-            log(f"Retrying {img.name} via {next_host}...", "Upload", c.YELLOW)
     return None
 
 def print_progress(done: int, total: int):
     bar_length = 10
     filled = int(bar_length * done // total)
     bar = "█" * filled + "▒" * (bar_length - filled)
-    print(f"\r{c.CYAN}Uploading {total} screenshots... [{bar}] {done}/{total} uploaded{c.RESET}", end="", flush=True)
-    if done == total: print()
+    text = f"{c.CYAN}Uploading {total} screenshots... [{bar}] {done}/{total} uploaded{c.RESET}"
+    if done == 0:
+        _lp.begin(SLOT_UPLOAD, text)
+    elif done == total:
+        _lp.end(SLOT_UPLOAD)
+    else:
+        _lp.update(SLOT_UPLOAD, text)
 
 def _bounded_workers(total_items: int) -> int:
     """Return a conservative worker count for I/O-bound uploads.
