@@ -609,8 +609,7 @@ class WebAppHandler(BaseHTTPRequestHandler):
 def _kill_port_if_busy(port: int) -> None:
     """Kill any process occupying *port* so the server can bind to it.
 
-    Works on Linux (``fuser``), macOS (``lsof`` + ``kill``), and Windows
-    (``netstat`` + ``taskkill``).  Silently ignores errors when the required
+    Uses ``fuser`` on Linux only.  Silently ignores errors when the required
     system tools are unavailable.
     """
     import socket as _socket
@@ -623,63 +622,19 @@ def _kill_port_if_busy(port: int) -> None:
     except OSError:
         return
 
-    # Port is in use – attempt to free it using OS-appropriate tools.
-    freed = False
-    if sys.platform == "win32":
-        # Windows: find PID via netstat, then taskkill.
-        # Match the exact local address "0.0.0.0:<port>" or "[::]:<port>" to avoid
-        # substring matches on ports sharing a numeric suffix (e.g., :80 vs :8080).
-        _port_re = re.compile(
-            rf"(?:0\.0\.0\.0|127\.0\.0\.1|\[::\]):{re.escape(str(port))}\s",
-            re.I,
-        )
-        try:
-            result = subprocess.run(
-                ["netstat", "-ano"],
-                capture_output=True, text=True, check=False, timeout=5,
-            )
-            for line in result.stdout.splitlines():
-                if _port_re.search(line) and "LISTENING" in line:
-                    parts = line.strip().split()
-                    if parts:
-                        pid = parts[-1]
-                        subprocess.run(
-                            ["taskkill", "/PID", pid, "/F"],
-                            capture_output=True, check=False, timeout=5,
-                        )
-                        freed = True
-                        break
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            pass
-    else:
-        # Linux: try fuser first
-        try:
-            subprocess.run(
-                ["fuser", "-k", f"{port}/tcp"],
-                capture_output=True, check=False, timeout=5,
-            )
-            freed = True
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            pass
+    if sys.platform != "linux":
+        return
 
-        if not freed:
-            # macOS / systems without fuser: use lsof
-            try:
-                result = subprocess.run(
-                    ["lsof", "-ti", f"tcp:{port}"],
-                    capture_output=True, text=True, check=False, timeout=5,
-                )
-                pids = result.stdout.strip().splitlines()
-                for pid in pids:
-                    pid = pid.strip()
-                    if pid.isdigit():
-                        subprocess.run(
-                            ["kill", "-9", pid],
-                            capture_output=True, check=False, timeout=5,
-                        )
-                        freed = True
-            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-                pass
+    # Port is in use – free it with fuser (Linux only).
+    freed = False
+    try:
+        subprocess.run(
+            ["fuser", "-k", f"{port}/tcp"],
+            capture_output=True, check=False, timeout=5,
+        )
+        freed = True
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
 
     if freed:
         _time.sleep(0.5)
@@ -865,13 +820,30 @@ def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
         bufsize=1, universal_newlines=True, startupinfo=hide_window()
     )
 
+    _pct_re = re.compile(r'(\d+)\s*%')
+    _last_pct = -1
+
+    def _print_torrent_bar(pct: int) -> None:
+        bar_length = 10
+        filled = int(bar_length * pct // 100)
+        bar = "█" * filled + "▒" * (bar_length - filled)
+        print(f"\r{c.CYAN}Creating torrent... [{bar}] {pct}%{c.RESET}", end="", flush=True)
+
     while True:
         line = process.stdout.readline()
-        if not line and process.poll() is not None: break
+        if not line and process.poll() is not None:
+            break
         if line:
             line = line.strip()
-            if "Hashing pieces" in line or "%" in line or "Wrote" in line:
-                print(f"\r{c.CYAN}{line}{c.RESET}", end="", flush=True)
+            m = _pct_re.search(line)
+            if m:
+                pct = min(int(m.group(1)), 100)
+                if pct != _last_pct:
+                    _print_torrent_bar(pct)
+                    _last_pct = pct
+            elif "Wrote" in line:
+                _print_torrent_bar(100)
+                _last_pct = 100
 
     print()
     returncode = process.wait()
