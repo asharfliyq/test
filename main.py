@@ -102,7 +102,7 @@ WRESTLING_TERMS = (
     r"Forbidden\s+Door",
 )
 WRESTLING_REGEX = re.compile(r"\b(?:" + "|".join(WRESTLING_TERMS) + r")\b", re.I)
-# Identifies fansub episode-range packs, e.g. "01 ~ 10" or "01~10".
+
 _FANSUB_PACK_RANGE_RE = re.compile(r'\b\d{1,3}\s*~\s*\d{1,3}\b')
 
 LATEST_JSON = None
@@ -127,13 +127,6 @@ class c:
     WHITE   = '\033[97m'
 
 def search_imdb(title: str) -> str | None:
-    """Search IMDb for a title and return the URL of the first matching title result.
-
-    Strips common technical release tags (resolution, codec, source, etc.) from
-    the title before searching so that results are more accurate.
-    Uses the IMDb suggestion API (same endpoint as the Tampermonkey UI) and falls
-    back to HTML scraping when the suggestion API is unavailable.
-    """
     clean = re.sub(
         r'\b(2160p|1080p|720p|480p|4K|UHD|SDR|HDR10?\+?|HLG|DV|DOVI|'
         r'BluRay|BDRip|BRRip|WEB-DL|WEBRip|HDTC|HDCAM|HDTS|DVDRip|CAM|'
@@ -142,9 +135,9 @@ def search_imdb(title: str) -> str | None:
         r'AMZN|NF|DSNP|HMAX|PCOK|SHO|PMTP|ATVP)\b',
         '', title, flags=re.I
     )
-    # Use [^\]]* instead of .*? to avoid catastrophic backtracking on bracket content.
+
     clean = re.sub(r'\[[^\]]*\]', '', clean)
-    # Use explicit space/tab classes to avoid overlap with \s that can cause ReDoS.
+
     clean = re.sub(r'[ \t]*-[ \t]*\S+[ \t]*$', '', clean)
     clean = re.sub(r'[._]+', ' ', clean)
     clean = re.sub(r'\s+', ' ', clean).strip(' .-')
@@ -155,7 +148,7 @@ def search_imdb(title: str) -> str | None:
         "Accept": "application/json",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    # Primary: IMDb suggestion API (fast, JSON, no scraping required)
+
     try:
         first_char = clean[0].lower()
         resp = requests.get(
@@ -170,7 +163,7 @@ def search_imdb(title: str) -> str | None:
                 return f"https://www.imdb.com/title/{items[0]['id']}/"
     except Exception as exc:
         error(f"IMDb suggestion API failed for '{clean}': {exc}")
-    # Fallback: HTML scraping
+
     try:
         resp = requests.get(
             f"https://www.imdb.com/find/?q={quote(clean)}&s=tt",
@@ -194,16 +187,14 @@ _IMDB_CLEAN_RE = re.compile(
     re.I,
 )
 
-# Pre-compiled pattern for detecting "sample" as a word boundary in file stems
-# (e.g., "movie.sample" or "sample_video" match; "resample" does not).
+
 _STEM_SAMPLE_RE = re.compile(r'(?:^|[^a-zA-Z])sample(?:[^a-zA-Z]|$)', re.I)
 
 def _clean_title_for_imdb(title: str) -> str:
-    """Strip technical release tags from *title* to produce a clean IMDb search query."""
     clean = _IMDB_CLEAN_RE.sub('', title)
-    # Limit bracket content length to avoid slow backtracking on malformed input.
+
     clean = re.sub(r'\[[^\]]{0,300}\]', '', clean)
-    # Strip trailing " - GroupName" suffix; anchor to end without trailing-space greediness.
+
     clean = re.sub(r'(?<=\S)[ \t]+-[ \t]+\S+$', '', clean)
     clean = re.sub(r'[._]+', ' ', clean)
     return re.sub(r'\s+', ' ', clean).strip(' .-')
@@ -215,13 +206,6 @@ _IMDB_HEADERS = {
 }
 
 def search_imdb_multi(title: str) -> list[dict]:
-    """Search IMDb and return up to ~8 candidate results.
-
-    Uses the same IMDb suggestion API as the Tampermonkey user script so results
-    are identical to what the modal popup would show.  Each dict contains:
-    ``id``, ``title``, ``year``, ``type``, and ``poster`` (URL string or empty).
-    Returns an empty list on failure.
-    """
     clean = _clean_title_for_imdb(title)
     if not clean:
         return []
@@ -265,14 +249,19 @@ _WEBAPP_HTML = """<!DOCTYPE html>
   --accent:#7c6ff7;--green:#4ade80;--yellow:#facc15;--r:10px}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
-  min-height:100vh;padding:16px;max-width:860px;margin:0 auto}
-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;
-  padding-bottom:16px;border-bottom:1px solid var(--border);margin-bottom:20px}
-.logo{font-size:1rem;font-weight:700;color:var(--yellow);letter-spacing:.3px;flex:1;text-align:center}
-.badges{display:flex;gap:6px;flex-wrap:wrap}
+  min-height:100vh;padding:16px;max-width:900px;margin:0 auto}
+header{display:flex;flex-direction:column;align-items:center;gap:8px;
+  padding-bottom:16px;border-bottom:1px solid var(--border);margin-bottom:20px;text-align:center}
+.logo{font-size:clamp(.85rem,2.5vw,1.1rem);font-weight:700;color:var(--yellow);letter-spacing:.3px}
+.header-row{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:100%}
+.badges{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
 .badge{padding:3px 9px;border-radius:20px;font-size:.7rem;font-weight:600;letter-spacing:.4px}
 .cat{background:#1a1a30;color:#9090e0;border:1px solid #2a2a60}
 .lang{background:#0f2010;color:#70c070;border:1px solid #1a4020}
+.stat-pills{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
+.stat-pill{padding:3px 10px;border-radius:20px;font-size:.7rem;font-weight:600;letter-spacing:.4px}
+.stat-pill.disk{background:#1a1020;color:#c084fc;border:1px solid #4c1d95}
+.stat-pill.bw{background:#0a1828;color:#7dd3fc;border:1px solid #0c4a6e}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r);padding:16px;margin-bottom:14px}
 .lbl{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;
   color:var(--muted);margin-bottom:10px}
@@ -335,11 +324,16 @@ button.dl{border-color:#4a8fc0;color:#80b8e0;background:#0a1828}
 <div id="loading"><div class="spin"></div><span>Waiting for data\u2026</span></div>
 <div id="app" style="display:none">
   <header>
-    <div style="flex:1"></div>
     <span class="logo">\u26a1 TorrentBD Lazy Upload</span>
-    <div class="badges" style="flex:1;justify-content:flex-end;display:flex;gap:6px;flex-wrap:wrap">
-      <span class="badge cat" id="cat-badge"></span>
-      <span class="badge lang" id="lang-badge"></span>
+    <div class="header-row">
+      <div class="badges">
+        <span class="badge cat" id="cat-badge"></span>
+        <span class="badge lang" id="lang-badge"></span>
+      </div>
+      <div class="stat-pills" id="stat-pills">
+        <span class="stat-pill disk" id="stat-disk">\U0001F4BE Disk: -- GB</span>
+        <span class="stat-pill bw" id="stat-bw">\U0001F4E1 BW: -- TiB</span>
+      </div>
     </div>
   </header>
 
@@ -504,7 +498,18 @@ async function poll(){
     setTimeout(poll,2000);
   }catch(e){setTimeout(poll,2000);}
 }
+async function fetchAppStats(){
+  try{
+    const r=await fetch('/api/appstats');
+    if(r.ok){
+      const j=await r.json();
+      if(j.disk_gb!=null)document.getElementById('stat-disk').textContent='\U0001F4BE Disk: '+j.disk_gb+' GB';
+      if(j.bw_tib!=null)document.getElementById('stat-bw').textContent='\U0001F4E1 BW: '+j.bw_tib+' TiB';
+    }
+  }catch(e){}
+}
 poll();
+fetchAppStats();
 </script>
 </body>
 </html>"""
@@ -528,6 +533,10 @@ class WebAppHandler(BaseHTTPRequestHandler):
             self._serve_imdb(qs)
         elif route == '/api/imdb_search':
             self._serve_imdb_search(qs)
+        elif route == '/api/appstats':
+            self._serve_appstats()
+        elif route == '/api/sysinfo':
+            self._serve_sysinfo()
         else:
             self.send_response(404)
             self.end_headers()
@@ -603,83 +612,51 @@ class WebAppHandler(BaseHTTPRequestHandler):
         self._send_headers('application/json; charset=utf-8', len(body))
         self.wfile.write(body)
 
+    def _serve_sysinfo(self):
+        with _sysinfo_lock:
+            data = dict(_sysinfo_cache)
+        body = json.dumps(data).encode('utf-8')
+        self._send_headers('application/json; charset=utf-8', len(body))
+        self.wfile.write(body)
+
+    def _serve_appstats(self):
+        body = json.dumps(_app_stats_cache).encode('utf-8')
+        self._send_headers('application/json; charset=utf-8', len(body))
+        self.wfile.write(body)
+
     def log_message(self, format, *args):
         return
 
-def _kill_port_if_busy(port: int) -> None:
-    """Kill any process occupying *port* so the server can bind to it.
+    def handle_error(self, request, client_address):
+        exc_type = sys.exc_info()[0]
+        if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+            return
+        super().handle_error(request, client_address)
 
-    Works on Linux (``fuser``), macOS (``lsof`` + ``kill``), and Windows
-    (``netstat`` + ``taskkill``).  Silently ignores errors when the required
-    system tools are unavailable.
-    """
+def _kill_port_if_busy(port: int) -> None:
     import socket as _socket
     import time as _time
     try:
         with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
             s.settimeout(0.3)
             if s.connect_ex(('127.0.0.1', port)) != 0:
-                return  # Port is free
+                return
     except OSError:
         return
 
-    # Port is in use – attempt to free it using OS-appropriate tools.
-    freed = False
-    if sys.platform == "win32":
-        # Windows: find PID via netstat, then taskkill.
-        # Match the exact local address "0.0.0.0:<port>" or "[::]:<port>" to avoid
-        # substring matches on ports sharing a numeric suffix (e.g., :80 vs :8080).
-        _port_re = re.compile(
-            rf"(?:0\.0\.0\.0|127\.0\.0\.1|\[::\]):{re.escape(str(port))}\s",
-            re.I,
-        )
-        try:
-            result = subprocess.run(
-                ["netstat", "-ano"],
-                capture_output=True, text=True, check=False, timeout=5,
-            )
-            for line in result.stdout.splitlines():
-                if _port_re.search(line) and "LISTENING" in line:
-                    parts = line.strip().split()
-                    if parts:
-                        pid = parts[-1]
-                        subprocess.run(
-                            ["taskkill", "/PID", pid, "/F"],
-                            capture_output=True, check=False, timeout=5,
-                        )
-                        freed = True
-                        break
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            pass
-    else:
-        # Linux: try fuser first
-        try:
-            subprocess.run(
-                ["fuser", "-k", f"{port}/tcp"],
-                capture_output=True, check=False, timeout=5,
-            )
-            freed = True
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            pass
+    if sys.platform != "linux":
+        return
 
-        if not freed:
-            # macOS / systems without fuser: use lsof
-            try:
-                result = subprocess.run(
-                    ["lsof", "-ti", f"tcp:{port}"],
-                    capture_output=True, text=True, check=False, timeout=5,
-                )
-                pids = result.stdout.strip().splitlines()
-                for pid in pids:
-                    pid = pid.strip()
-                    if pid.isdigit():
-                        subprocess.run(
-                            ["kill", "-9", pid],
-                            capture_output=True, check=False, timeout=5,
-                        )
-                        freed = True
-            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-                pass
+
+    freed = False
+    try:
+        subprocess.run(
+            ["fuser", "-k", f"{port}/tcp"],
+            capture_output=True, check=False, timeout=5,
+        )
+        freed = True
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
 
     if freed:
         _time.sleep(0.5)
@@ -688,18 +665,105 @@ def _kill_port_if_busy(port: int) -> None:
 _http_server_started = False
 _http_server_lock = threading.Lock()
 
+_sysinfo_cache: dict = {'cpu': 0.0, 'ram_used': 0, 'ram_total': 0, 'disk_used': 0, 'disk_total': 0}
+_sysinfo_lock = threading.Lock()
+_cpu_prev_stat: tuple | None = None
+
+_app_stats_cache: dict = {'disk_gb': None, 'bw_tib': None}
+
+
+def _fetch_app_stats() -> None:
+    """Run ``app-stats show`` and populate _app_stats_cache with the latest
+    disk (GB) and bandwidth (TiB) values."""
+    try:
+        result = subprocess.run(
+            ['app-stats', 'show'],
+            capture_output=True, text=True, timeout=30,
+        )
+        output = result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return
+
+    def _latest_value(section_header: str) -> int | None:
+        in_section = False
+        last_val: int | None = None
+        for line in output.splitlines():
+            if section_header in line:
+                in_section = True
+                continue
+            if in_section:
+                if line.strip().startswith('***'):
+                    break
+                parts = line.split()
+                if len(parts) >= 3:
+                    try:
+                        last_val = int(parts[2])
+                    except ValueError:
+                        pass
+        return last_val
+
+    disk_gb = _latest_value('disk stats')
+    traffic_gb = _latest_value('traffic stats')
+
+    bw_tib: float | None = None
+    if traffic_gb is not None:
+        bw_tib = round(traffic_gb / 1024, 2)
+
+    _app_stats_cache['disk_gb'] = disk_gb
+    _app_stats_cache['bw_tib'] = bw_tib
+
+
+def _read_proc_stat() -> tuple[int, int]:
+    with open('/proc/stat', 'r') as f:
+        parts = f.readline().split()
+    vals = list(map(int, parts[1:10]))
+    total = sum(vals)
+    idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+    return total, idle
+
+def _update_sysinfo_loop() -> None:
+    global _cpu_prev_stat
+    import time as _time
+    while True:
+        _time.sleep(2)
+        try:
+            total, idle = _read_proc_stat()
+            cpu_pct = 0.0
+            if _cpu_prev_stat:
+                pt, pi = _cpu_prev_stat
+                dt = total - pt
+                di = idle - pi
+                cpu_pct = max(0.0, min(100.0, 100.0 * (1 - di / dt))) if dt > 0 else 0.0
+            _cpu_prev_stat = (total, idle)
+            with open('/proc/meminfo', 'r') as f:
+                mem = f.read()
+            m_total = re.search(r'MemTotal:\s+(\d+)', mem)
+            m_avail = re.search(r'MemAvailable:\s+(\d+)', mem)
+            if not m_total or not m_avail:
+                continue
+            mem_total_kb = int(m_total.group(1))
+            mem_avail_kb = int(m_avail.group(1))
+            disk = shutil.disk_usage('/')
+            with _sysinfo_lock:
+                _sysinfo_cache.update({
+                    'cpu': round(cpu_pct, 1),
+                    'ram_used': (mem_total_kb - mem_avail_kb) * 1024,
+                    'ram_total': mem_total_kb * 1024,
+                    'disk_used': disk.used,
+                    'disk_total': disk.total,
+                })
+        except Exception:
+            pass
+
+
+_server_ready_event = threading.Event()
+
 
 def start_server_thread(port: int):
-    """Start the web app server in a background daemon thread.
-
-    The server listens on *port* and serves the upload assistant web app at ``/``
-    together with API endpoints (``/api/data``, ``/api/torrent``, ``/api/imdb``,
-    ``/api/cover``).  If the port is already occupied it is freed before binding.
-    If the server is already running in this process, this call is a no-op.
-    """
     global _http_server_started
     with _http_server_lock:
         if _http_server_started:
+            _server_ready_event.set()
             return
         _http_server_started = True
 
@@ -712,7 +776,8 @@ def start_server_thread(port: int):
         for attempt in range(1, max_attempts + 1):
             try:
                 httpd = HTTPServer(('', port), WebAppHandler)
-                print(f"\n{c.GREEN}⚡ Web App running on http://localhost:{port}{c.RESET}")
+                _lp.log(f"{c.GREEN}⚡ Web App running on http://localhost:{port}{c.RESET}")
+                _server_ready_event.set()
                 httpd.serve_forever()
                 return
             except OSError:
@@ -720,19 +785,27 @@ def start_server_thread(port: int):
                     _time.sleep(0.5 * attempt)
                     _kill_port_if_busy(port)
                 else:
-                    print(f"\n{c.RED}Error: Port {port} is busy.{c.RESET}")
+                    _lp.log(f"{c.RED}Error: Port {port} is busy.{c.RESET}")
+                    _server_ready_event.set()
             except Exception as e:
-                print(f"\n{c.RED}Server error: {e}{c.RESET}")
+                _lp.log(f"{c.RED}Server error: {e}{c.RESET}")
+                _server_ready_event.set()
                 return
-        # All bind attempts failed – reset flag so a future call can retry.
         with _http_server_lock:
             _http_server_started = False
+        _server_ready_event.set()
+
+    if sys.platform == "linux":
+        _si_thread = threading.Thread(target=_update_sysinfo_loop, daemon=True, name="sysinfo")
+        _si_thread.start()
+
+    _stats_thread = threading.Thread(target=_fetch_app_stats, daemon=True, name="appstats")
+    _stats_thread.start()
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
 
 def cleanup_sync_files():
-    """Deletes sync files and optionally generated files on exit"""
     try:
 
         if LATEST_JSON and LATEST_JSON.exists():
@@ -763,6 +836,92 @@ def cleanup_sync_files():
 
 atexit.register(cleanup_sync_files)
 
+
+_SUPPORTS_LIVE = sys.stdout.isatty()
+
+SLOT_TORRENT = 0
+SLOT_CAMERA  = 1
+SLOT_UPLOAD  = 2
+
+class _LiveProgress:
+
+    def __init__(self) -> None:
+        self._lock   = threading.Lock()
+        self._slots: dict[int, str] = {}
+        self._order: list[int]      = []
+        self._nlines: int           = 0
+
+
+    def begin(self, slot: int, text: str = "") -> None:
+        with self._lock:
+            if slot in self._slots:
+                return
+            self._slots[slot] = text
+            self._order.append(slot)
+            self._order.sort()
+            self._nlines = len(self._order)
+            if _SUPPORTS_LIVE:
+                sys.stdout.write(f"\r\033[K{text}\n")
+                sys.stdout.flush()
+            else:
+                print(text)
+
+    def update(self, slot: int, text: str) -> None:
+        with self._lock:
+            if slot not in self._slots:
+                return
+            self._slots[slot] = text
+            if not _SUPPORTS_LIVE:
+                return
+            n = self._nlines
+            if n == 0:
+                return
+            sys.stdout.write(f"\033[{n}A")
+            for s in self._order:
+                sys.stdout.write(f"\r\033[K{self._slots[s]}\n")
+            sys.stdout.flush()
+
+    def end(self, slot: int) -> None:
+        with self._lock:
+            if slot not in self._slots:
+                return
+            old_count = len(self._order)
+            del self._slots[slot]
+            self._order.remove(slot)
+            new_count = len(self._order)
+            self._nlines = new_count
+            if not _SUPPORTS_LIVE:
+                return
+            if old_count > 0:
+                sys.stdout.write(f"\033[{old_count}A")
+                for s in self._order:
+                    sys.stdout.write(f"\r\033[K{self._slots[s]}\n")
+
+
+                extras = old_count - new_count
+                for i in range(extras):
+                    if i < extras - 1:
+                        sys.stdout.write(f"\r\033[K\n")
+                    else:
+                        sys.stdout.write(f"\r\033[K")
+                sys.stdout.flush()
+
+    def log(self, text: str) -> None:
+        with self._lock:
+            if not _SUPPORTS_LIVE or self._nlines == 0:
+                sys.stdout.write(f"{text}\n")
+                sys.stdout.flush()
+                return
+            n = self._nlines
+            sys.stdout.write(f"\033[{n}A")
+            sys.stdout.write(f"\r\033[K{text}\n")
+            for s in self._order:
+                sys.stdout.write(f"\r\033[K{self._slots[s]}\n")
+            sys.stdout.flush()
+
+_lp = _LiveProgress()
+
+
 def clear(): os.system('cls' if os.name == 'nt' else 'clear')
 
 def banner():
@@ -777,7 +936,7 @@ def banner():
 
 def log(msg: str, icon: str = "•", color: str = c.CYAN):
     t = datetime.now().strftime("%H:%M:%S")
-    print(f"{color}[{t}] {icon} {msg}{c.RESET}")
+    _lp.log(f"{color}[{t}] {icon} {msg}{c.RESET}")
 
 def success(msg): log(msg, "Success", c.GREEN)
 def error(msg):   log(msg, "Error", c.RED)
@@ -803,7 +962,7 @@ def copy_to_clipboard(text: str):
     except:
         pass
 
-def create_torrent(target: Path) -> bool:
+def create_torrent(target: Path, include_srt: bool | None = None) -> bool:
     global GENERATED_TORRENT
     if not CREATE_TORRENT_FILE:
         log("Skipping torrent creation (disabled)", "Skip")
@@ -812,13 +971,13 @@ def create_torrent(target: Path) -> bool:
         error("mkbrr not found! → https://github.com/autobrr/mkbrr")
         return False
 
-    # ── Build exclusion patterns ──────────────────────────────────────────────
+
     exclude_patterns: list[str] = []
     if target.is_dir():
-        # Always exclude metadata/info sidecar files
+
         exclude_patterns.extend(["*.nfo", "*.txt","*.srr"])
 
-        # Exclude screens/screen/proof directories and files recursively
+
         _exclude_dir_names = {"screens", "screen", "proof", "screenshots", "screenshot", "Sample", "sample"}
         for item in target.rglob("*"):
             lower_name = item.name.lower()
@@ -835,16 +994,18 @@ def create_torrent(target: Path) -> bool:
                 if rel not in exclude_patterns:
                     exclude_patterns.append(rel)
 
-        # Prompt user about .srt subtitle files
+
         srt_files = [f for f in target.rglob("*.srt")]
         if srt_files:
-            log(f"Found {len(srt_files)} .srt subtitle file(s) in folder.", "SRT", c.YELLOW)
-            for sf in srt_files[:3]:
-                print(f"   {c.DIM}{sf.name}{c.RESET}")
-            if len(srt_files) > 3:
-                print(f"   {c.DIM}...and {len(srt_files) - 3} more{c.RESET}")
-            ans = input(f"\n{c.BOLD}Include .srt files in torrent? [y/N]: {c.RESET}").strip().lower()
-            if ans != 'y':
+            if include_srt is None:
+                log(f"Found {len(srt_files)} .srt subtitle file(s) in folder.", "SRT", c.YELLOW)
+                for sf in srt_files[:3]:
+                    print(f"   {c.DIM}{sf.name}{c.RESET}")
+                if len(srt_files) > 3:
+                    print(f"   {c.DIM}...and {len(srt_files) - 3} more{c.RESET}")
+                ans = input(f"\n{c.BOLD}Include .srt files in torrent? [y/N]: {c.RESET}").strip().lower()
+                include_srt = (ans == 'y')
+            if not include_srt:
                 exclude_patterns.append("*.srt")
                 log("Excluding .srt files from torrent.", "SRT")
 
@@ -863,15 +1024,35 @@ def create_torrent(target: Path) -> bool:
         bufsize=1, universal_newlines=True, startupinfo=hide_window()
     )
 
-    while True:
-        line = process.stdout.readline()
-        if not line and process.poll() is not None: break
-        if line:
-            line = line.strip()
-            if "Hashing pieces" in line or "%" in line or "Wrote" in line:
-                print(f"\r{c.CYAN}{line}{c.RESET}", end="", flush=True)
+    _pct_re = re.compile(r'(\d+)\s*%')
+    _last_pct = -1
 
-    print()
+    def _bar_text(pct: int) -> str:
+        bar_length = 10
+        filled = int(bar_length * pct // 100)
+        bar = "█" * filled + "▒" * (bar_length - filled)
+        return f"{c.CYAN}Creating torrent... [{bar}] {pct}%{c.RESET}"
+
+    _lp.begin(SLOT_TORRENT, _bar_text(0))
+    try:
+        while True:
+            line = process.stdout.readline()
+            if not line and process.poll() is not None:
+                break
+            if line:
+                line = line.strip()
+                m = _pct_re.search(line)
+                if m:
+                    pct = min(int(m.group(1)), 100)
+                    if pct != _last_pct:
+                        _lp.update(SLOT_TORRENT, _bar_text(pct))
+                        _last_pct = pct
+                elif "Wrote" in line:
+                    _lp.update(SLOT_TORRENT, _bar_text(100))
+                    _last_pct = 100
+    finally:
+        _lp.end(SLOT_TORRENT)
+
     returncode = process.wait()
 
     if returncode == 0 and out.exists():
@@ -1010,15 +1191,6 @@ def find_cover_image(folder: Path) -> Path | None:
 _FAKINGTHEFUNK_NAMES = frozenset({"fakingthefunk.jpg", "fakingthefunk.png", "fakingthefunk.jpeg"})
 
 def find_fakingthefunk_image(search_root: Path) -> Path | None:
-    """Search *search_root* (recursively) for a fakingthefunk proof image.
-
-    Looks for a file named ``fakingthefunk.jpg``, ``fakingthefunk.png``, or
-    ``fakingthefunk.jpeg`` anywhere inside the folder tree.  This covers both
-    regular album folders and discography roots where the image may live inside
-    a sub-album directory.
-
-    Returns the path to the first match found, or ``None`` if absent.
-    """
     if search_root.is_file():
         return None
     for candidate in search_root.rglob("*"):
@@ -1027,19 +1199,6 @@ def find_fakingthefunk_image(search_root: Path) -> Path | None:
     return None
 
 def extract_cover_from_audio(audio_files: list[Path], dest_dir: Path) -> Path | None:
-    """Try to extract embedded cover art from audio files using ffmpeg.
-
-    Iterates through audio_files in order and attempts to extract an attached
-    image stream from each file.  The extracted image is written to
-    dest_dir/extracted_cover.jpg.
-
-    Args:
-        audio_files: List of audio file paths to try, in priority order.
-        dest_dir:    Directory where the extracted cover will be saved.
-
-    Returns:
-        Path to the extracted cover image, or None if no embedded cover found.
-    """
     if not shutil.which("ffmpeg"):
         return None
     out_path = dest_dir / "extracted_cover.jpg"
@@ -1059,11 +1218,6 @@ def extract_cover_from_audio(audio_files: list[Path], dest_dir: Path) -> Path | 
     return None
 
 def select_representative_audio_file(audio_files: list[Path], base_dir: Path | None = None) -> Path:
-    """Pick a representative audio file for metadata/spectrogram generation.
-
-    For nested audio folders (e.g., discography roots), prefer the top-level
-    release bucket with the most tracks instead of always taking the first file.
-    """
     if not audio_files:
         raise ValueError("audio_files cannot be empty")
 
@@ -1090,7 +1244,7 @@ def select_representative_audio_file(audio_files: list[Path], base_dir: Path | N
     if not bucket_files:
         return audio_files[0]
 
-    # Prefer the most common extension within the selected bucket.
+
     ext_counts = Counter(p.suffix.lower() for p in bucket_files)
     if not ext_counts:
         return sort_paths_by_mtime(bucket_files)[0]
@@ -1210,13 +1364,13 @@ def generate_audio_title(folder_name: str, metadata: dict) -> str:
     bit_hz_str = f"[{bit_depth}bit-{sample_rate_khz}kHz]"
     ext_str = f"[{file_extension}]"
 
-    # Check if folder_name contains [E] marker
+
     has_e_marker = bool(re.search(r'\[E\]', folder_name))
 
-    # Remove [E] from folder_name to avoid duplication
+
     folder_name_clean = re.sub(r'\s*\[E\]\s*', ' ', folder_name).strip()
 
-    # Only add [E] if the original folder name had it
+
     e_marker = " [E]" if has_e_marker else ""
 
     if artist:
@@ -1226,10 +1380,10 @@ def generate_audio_title(folder_name: str, metadata: dict) -> str:
 
     return title
 
-# Detect Dolby Vision / HDR10 markers in filenames or mediainfo text.
+
 _DOLBY_VISION_PATTERN = r"dolby\s*vision|dvhe\.\d+"
 _DOVI_PATTERN = r"dovi(?:\b|[.\-_\s])"
-# dv requires delimiters to avoid false positives on tokens like "DVD"
+
 _DV_TOKEN_PATTERN = r"(?:^|[.\-_\s])dv(?:$|[.\-_\s])"
 _HDR10_PATTERN = r"hdr(?:10\+?|\s*10\+?)"
 
@@ -1239,11 +1393,6 @@ _HDR_DV_REGEX = re.compile(
 )
 
 def needs_hdr10_dv_screenshot(mediainfo_text: str = "", file_name: str = "") -> bool:
-    """Return True when the media appears to be Dolby Vision or HDR10/10+.
-
-    Checks for common HDR/DV markers in either the mediainfo text or filename
-    (e.g., 'Dolby Vision', 'DVHE.07', '.DV.', 'HDR10', 'HDR 10+').
-    """
     return bool(_HDR_DV_REGEX.search(file_name) or _HDR_DV_REGEX.search(mediainfo_text))
 
 def _build_screenshot_cmd(video: Path, timestamp: float, output_file: Path, hdr_dv: bool, crop: str | None = None) -> list[str]:
@@ -1251,7 +1400,7 @@ def _build_screenshot_cmd(video: Path, timestamp: float, output_file: Path, hdr_
     if crop:
         cmd += ["-vf", f"crop={crop}"]
     if hdr_dv:
-        # Use -frames/-update for DV/HDR10 to avoid extra tone-mapping paths when grabbing a single frame.
+
         cmd += ["-frames:v", "1", "-update", "1", "-q:v", "1"]
     else:
         cmd += ["-vframes", "1", "-q:v", "1"]
@@ -1260,10 +1409,9 @@ def _build_screenshot_cmd(video: Path, timestamp: float, output_file: Path, hdr_
 
 
 def _detect_crop(video: Path, timestamp: float) -> str | None:
-    """Detect crop parameters for a single frame to remove black bars."""
     try:
-        # cropdetect parameters use CROP_LUMINANCE_THRESHOLD / CROP_ROUNDING / CROP_RESET_INTERVAL.
-        # These defaults are generous to pick up letter/pillarboxing without over-cropping real content.
+
+
         res = subprocess.run(
             [
                 "ffmpeg",
@@ -1316,37 +1464,43 @@ def take_screenshots(video: Path, hdr_dv: bool, count: int = SCREENSHOT_COUNT) -
         return duration * (start_percent + (total_range * progress))
 
     if CROP_BLACK_BARS:
-        # Detect crop once (first sample) and reuse; assumes aspect ratio stays consistent across the video.
-        # Variable-AR titles (e.g., IMAX sequences) may keep letterboxing in some captures.
+
+
         first_progress = 1 / (count + 1)
         first_timestamp = _timestamp(first_progress)
         crop = _detect_crop(video, first_timestamp)
 
-    for i in range(1, count + 1):
-        progress = i / (count + 1)
-        timestamp = _timestamp(progress)
-        ext = "png" if LOSSLESS_SCREENSHOT else "jpg"
-        output_file = Path(f"ss_{i:02d}.{ext}")
+    def _ss_bar_text(done: int) -> str:
+        bar_length = 10
+        filled = int(bar_length * done // count) if count else bar_length
+        bar = "█" * filled + "▒" * (bar_length - filled)
+        return f"{c.CYAN}Taking screenshots... [{bar}] {done}/{count}{c.RESET}"
 
-        cmd = _build_screenshot_cmd(video, timestamp, output_file, hdr_dv, crop=crop)
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hide_window())
+    _lp.begin(SLOT_CAMERA, _ss_bar_text(0))
+    try:
+        for i in range(1, count + 1):
+            progress = i / (count + 1)
+            timestamp = _timestamp(progress)
+            ext = "png" if LOSSLESS_SCREENSHOT else "jpg"
+            output_file = Path(f"ss_{i:02d}.{ext}")
 
-        if output_file.exists():
-            size_mb = output_file.stat().st_size / (1024 * 1024)
-            if LOSSLESS_SCREENSHOT and ext == "png" and size_mb > max_size_mb:
-                output_file.unlink()
-                jpeg_file = Path(f"ss_{i:02d}.jpg")
-                cmd_jpg = _build_screenshot_cmd(video, timestamp, jpeg_file, hdr_dv, crop=crop)
-                subprocess.run(cmd_jpg, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hide_window())
-                if jpeg_file.exists():
-                    files.append(jpeg_file)
-                    print(f"   {c.YELLOW}Success {i}/{count} → JPEG (PNG too big){c.RESET}")
-                continue
-            files.append(output_file)
-            fmt = "PNG" if ext == "png" else "JPG"
-            print(f"   {c.GREEN}Success {i}/{count} → {fmt} ({size_mb:.1f} MB){c.RESET}")
-        else:
-            print(f"   {c.RED}Failed {i}/{count}{c.RESET}")
+            cmd = _build_screenshot_cmd(video, timestamp, output_file, hdr_dv, crop=crop)
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hide_window())
+
+            if output_file.exists():
+                size_mb = output_file.stat().st_size / (1024 * 1024)
+                if LOSSLESS_SCREENSHOT and ext == "png" and size_mb > max_size_mb:
+                    output_file.unlink()
+                    jpeg_file = Path(f"ss_{i:02d}.jpg")
+                    cmd_jpg = _build_screenshot_cmd(video, timestamp, jpeg_file, hdr_dv, crop=crop)
+                    subprocess.run(cmd_jpg, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hide_window())
+                    if jpeg_file.exists():
+                        files.append(jpeg_file)
+                else:
+                    files.append(output_file)
+            _lp.update(SLOT_CAMERA, _ss_bar_text(i))
+    finally:
+        _lp.end(SLOT_CAMERA)
     return files
 
 def _parse_upload_error_message(data: dict) -> str:
@@ -1360,11 +1514,6 @@ def _parse_upload_error_message(data: dict) -> str:
     return "unknown error"
 
 def _upload_via_host(img: Path, host: str, timeout: int = UPLOAD_TIMEOUT) -> tuple[str | None, bool]:
-    """Upload a single image to a given host.
-
-    Returns a tuple of (direct_url, fatal_error). fatal_error is True for non-retriable
-    file errors (e.g., missing/locked files) so the caller can skip host fallbacks.
-    """
     filename = img.name
     try:
         if host == "imgbb":
@@ -1381,7 +1530,7 @@ def _upload_via_host(img: Path, host: str, timeout: int = UPLOAD_TIMEOUT) -> tup
                 if r.status_code == 200:
                     data = r.json()
                     image_data = data.get("data") or {}
-                    # Prefer url over display_url when url is available and non-empty.
+
                     direct_url = image_data.get("url")
                     display_url = image_data.get("display_url")
                     image_url = direct_url if direct_url else display_url
@@ -1413,47 +1562,36 @@ def _upload_via_host(img: Path, host: str, timeout: int = UPLOAD_TIMEOUT) -> tup
     return None, False
 
 def upload_image(img: Path) -> str | None:
-    """Upload an image using the preferred host with a single fallback.
-
-    If IMAGE_HOST is unsupported, the function defaults to imgbb then freeimage.
-    Retries are skipped when _upload_via_host reports a fatal (file) error.
-    """
     primary = _DEPRECATED_HOST_ALIASES.get(IMAGE_HOST.lower(), IMAGE_HOST.lower())
     supported_hosts = ("imgbb", "freeimage")
     if primary not in supported_hosts:
         error(f"Unsupported IMAGE_HOST '{primary}', defaulting to supported hosts")
         hosts = list(supported_hosts)
     else:
-        # Preserve configured host order and then try remaining supported hosts as fallbacks.
+
         hosts = [primary] + [h for h in supported_hosts if h != primary]
 
     for idx, host in enumerate(hosts):
         url, fatal = _upload_via_host(img, host)
         if url:
-            if idx > 0:
-                success(f"Fallback upload via {host} succeeded for {img.name}")
             return url
         if fatal:
             break
-        if idx < len(hosts) - 1:
-            next_host = hosts[idx + 1]
-            log(f"Retrying {img.name} via {next_host}...", "Upload", c.YELLOW)
     return None
 
 def print_progress(done: int, total: int):
     bar_length = 10
     filled = int(bar_length * done // total)
     bar = "█" * filled + "▒" * (bar_length - filled)
-    print(f"\r{c.CYAN}Uploading {total} screenshots... [{bar}] {done}/{total} uploaded{c.RESET}", end="", flush=True)
-    if done == total: print()
+    text = f"{c.CYAN}Uploading {total} screenshots... [{bar}] {done}/{total} uploaded{c.RESET}"
+    if done == 0:
+        _lp.begin(SLOT_UPLOAD, text)
+    elif done == total:
+        _lp.end(SLOT_UPLOAD)
+    else:
+        _lp.update(SLOT_UPLOAD, text)
 
 def _bounded_workers(total_items: int) -> int:
-    """Return a conservative worker count for I/O-bound uploads.
-
-    Uses the MIN_IO_WORKERS/IO_WORKER_MULTIPLIER tuning for upload tasks and caps
-    workers by the configured limit, the items to process, and a modest scaling
-    factor to avoid spawning more threads than the workload can use.
-    """
     cpu_count = os.cpu_count() or 1
     max_io_workers = max(MIN_IO_WORKERS, cpu_count * IO_WORKER_MULTIPLIER)
     return max(1, min(MAX_CONCURRENT_UPLOADS, total_items, max_io_workers))
@@ -1538,12 +1676,28 @@ def detect_language(mediainfo_text: str) -> str:
     lang_options_lower = {name.lower(): language_id for name, language_id in lang_options.items()}
     return lang_options_lower.get(language, "0")
 
+_SAMPLE_DIR_NAMES = {"sample", "samples"}
+
+def _is_sample_file(path: Path, base_dir: Path | None = None) -> bool:
+    if _STEM_SAMPLE_RE.search(path.stem.lower()):
+        return True
+    check = path.parent
+    while True:
+        if check.name.lower() in _SAMPLE_DIR_NAMES:
+            return True
+        if base_dir is not None and check == base_dir:
+            break
+        parent = check.parent
+        if parent == check:
+            break
+        check = parent
+    return False
+
 def sort_paths_by_mtime(paths: list[Path]) -> list[Path]:
     mtimes = {p: p.stat().st_mtime for p in paths}
     return sorted(paths, key=lambda p: (mtimes[p], p.name.lower()))
 
 def trim_mediainfo_complete_name(mediainfo_text: str, base_dir: Path) -> str:
-    """Remove selected base directory prefix from MediaInfo 'Complete name' paths."""
     prefix = str(base_dir)
     prefix_posix = prefix.replace("\\", "/").rstrip("/") + "/"
     prefix_windows = prefix.replace("/", "\\").rstrip("\\") + "\\"
@@ -1578,7 +1732,7 @@ def detect_category(title: str, mediainfo_text: str = "") -> str | None:
     sd_resolution_regex = re.compile(r'(720p|720P|720)', re.I)
     episode_regex = re.compile(r'S\d+E\d+', re.I)
     season_regex = re.compile(r'S\d+', re.I)
-    # Match each Audio section body until the next top-level section header.
+
     audio_section_regex = re.compile(
         r'^\s*Audio(?:\s*#\d+)?\s*$([\s\S]*?)(?=^\s*(?:General|Video|Audio(?:\s*#\d+)?|Text(?:\s*#\d+)?|Menu)\s*$|\Z)',
         re.I | re.M,
@@ -1641,12 +1795,10 @@ def detect_category(title: str, mediainfo_text: str = "") -> str | None:
     return None
 
 
-# ── PDF Helpers ──────────────────────────────────────────────────────────────
-
 ISBN_PATTERN = re.compile(
     r'\b97[89][0-9Xx\-\s]{10,}\b|\b\d{9}[\dXx]\b'
 )
-# Matches common ISBN-10/ISBN-13 patterns with optional separators.
+
 ORDINAL_EXCEPTIONS = (11, 12, 13)
 
 def _build_edition_label(num_str: str) -> str:
@@ -1684,7 +1836,6 @@ def _extract_edition_from_text(text: str) -> tuple[str | None, str]:
 
 
 def parse_pdf_filename(filename: str) -> dict:
-    """Extract a best-effort title/author/edition/isbn from a PDF filename."""
     stem = Path(filename).stem
     cleaned = re.sub(r'[._]+', ' ', stem)
     cleaned = re.sub(r'\s+', ' ', cleaned).strip(" -._")
@@ -1787,13 +1938,13 @@ def build_book_info(pdf_path: Path, page_count: int | None) -> dict:
     }
 
     api_data = fetch_book_info_by_isbn(isbn) if isbn else None
-    # Prompt for an ISBN when no API data is available—this enriches metadata even
-    # when filenames already provide a title/author but lack an ISBN.
+
+
     has_isbn = bool(isbn)
     has_title = bool(book_info["title"])
     has_authors = bool(book_info["authors"])
     needs_isbn_prompt = not api_data and (not has_isbn or not has_title or not has_authors)
-    # When no API data is available, prompt if the ISBN or core metadata is missing to enrich details.
+
     if needs_isbn_prompt:
         isbn_from_user = prompt_for_isbn()
         if isbn_from_user:
@@ -1850,7 +2001,6 @@ def get_pdf_page_count(pdf_path: Path) -> int | None:
 
 
 def pick_pdf_pages(page_count: int | None, sample_count: int = 5) -> list[int]:
-    """Pick preview pages for images; distributes selections evenly for consistency."""
     pages = [1]
     if page_count and page_count > 1:
         take = min(sample_count, page_count - 1)
@@ -1966,7 +2116,6 @@ def format_title_for_metadata(target_path: Path, is_folder: bool, video_path: Pa
     source_path = video_path if (is_folder and video_path) else target_path
     stem = source_path.stem
 
-    # Pattern that identifies fansub episode-range packs is defined at module level.
 
     if is_folder and torrent_name:
         folder_has_episode = bool(re.search(r'\bS\d{2}E\d{2}\b', target_path.name, re.I))
@@ -1975,12 +2124,11 @@ def format_title_for_metadata(target_path: Path, is_folder: bool, video_path: Pa
 
         if file_has_episode and not folder_has_episode and not torrent_has_episode:
             try:
-                return generate_title(str(target_path))
+                return generate_title(str(source_path), is_season_pack=True)
             except Exception:
                 return target_path.name.replace('.torrent', '')
 
-        # Detect a fansub multi-episode pack (torrent or folder contains a range
-        # like "01 ~ 10").  Individual episode sub-titles should not be included.
+
         pack_names = [torrent_name, target_path.name]
         is_fansub_pack = any(_FANSUB_PACK_RANGE_RE.search(n) for n in pack_names if n)
         if is_fansub_pack:
@@ -2056,25 +2204,32 @@ def main():
     target_path, is_folder = select_target()
     if not target_path or not target_path.exists(): return
 
-    # Rename the file/folder if it starts with a site watermark prefix (e.g. "www.UIndex.org - ").
-    clean_name = strip_leading_site_prefix(target_path.name)
-    if clean_name and clean_name != target_path.name:
-        renamed_path = target_path.parent / clean_name
+
+    _stripped = strip_leading_site_prefix(target_path.name)
+    if not is_folder:
+        _stem, _ext = os.path.splitext(_stripped)
+        _norm_stem = re.sub(r'[._ ]+', '.', _stem).strip('.')
+        _final_name = (_norm_stem + _ext) if _norm_stem else _stripped
+    else:
+        _norm = re.sub(r'[._ ]+', '.', _stripped).strip('.')
+        _final_name = _norm if _norm else _stripped
+    if _final_name and _final_name != target_path.name:
+        renamed_path = target_path.parent / _final_name
         if not renamed_path.exists():
             try:
                 target_path.rename(renamed_path)
-                log(f"Renamed: '{target_path.name}' → '{clean_name}'", "Rename", c.YELLOW)
+                log(f"Renamed: '{target_path.name}' → '{_final_name}'", "Rename", c.YELLOW)
                 target_path = renamed_path
             except OSError as exc:
                 error(f"Could not rename '{target_path.name}': {exc}")
         else:
-            log(f"Skipping rename – '{clean_name}' already exists in the same directory.", "Rename", c.YELLOW)
+            log(f"Skipping rename – '{_final_name}' already exists in the same directory.", "Rename", c.YELLOW)
 
     sync_dir = target_path.parent
     LATEST_JSON = sync_dir / "latest.json"
     INDEX_HTML = sync_dir / "index.html"
 
-    # Clean up stale temp files from any previous run before starting.
+
     _stale_cleanup = [
         LATEST_JSON,
         INDEX_HTML,
@@ -2096,8 +2251,24 @@ def main():
     clear(); banner()
     print(f"{c.BOLD}{c.PURPLE}Selected → {target_path.name}{c.RESET} {'(Folder Mode)' if is_folder else ''}\n")
 
-    if not create_torrent(target_path):
-        if CREATE_TORRENT_FILE: input("\nPress Enter to exit..."); return
+
+    _srt_include: bool | None = None
+    if is_folder:
+        _srt_check = list(target_path.rglob("*.srt"))
+        if _srt_check:
+            log(f"Found {len(_srt_check)} .srt subtitle file(s) in folder.", "SRT", c.YELLOW)
+            for _sf in _srt_check[:3]:
+                print(f"   {c.DIM}{_sf.name}{c.RESET}")
+            if len(_srt_check) > 3:
+                print(f"   {c.DIM}...and {len(_srt_check) - 3} more{c.RESET}")
+            _srt_include = (input(f"\n{c.BOLD}Include .srt files in torrent? [y/N]: {c.RESET}").strip().lower() == 'y')
+
+
+    _torrent_result: list[bool] = [False]
+    def _torrent_worker():
+        _torrent_result[0] = create_torrent(target_path, _srt_include)
+    _torrent_thread = threading.Thread(target=_torrent_worker, daemon=True, name="torrent-creator")
+    _torrent_thread.start()
 
     is_audio_folder = False
     is_pdf = False
@@ -2131,7 +2302,7 @@ def main():
             error("No audio files found!")
             return
 
-        # ── Discography detection (needed before spectrogram) ────────────────
+
         is_discography_selection = False
         if is_folder:
             relative_parts_list: list[tuple[str, ...]] = []
@@ -2147,16 +2318,14 @@ def main():
             }
             is_discography_selection = len(top_level_album_dirs) > 1
 
-        # ── Representative audio for metadata / mediainfo ─────────────────────
+
         first_audio = select_representative_audio_file(audio_files, target_path if is_folder else None)
         metadata = extract_audio_metadata(first_audio)
 
         mediainfo_text = get_mediainfo(first_audio)
         mediainfo_text = trim_mediainfo_complete_name(mediainfo_text, sync_dir)
 
-        # ── Spectrogram ───────────────────────────────────────────────────────
-        # Use 3 spectrograms when at least 3 tracks are available; otherwise
-        # include 2 spectrograms as fallback.
+
         preferred_spectrogram_audio = random.choice(audio_files) if is_discography_selection else first_audio
         spectrogram_audios = select_audio_files_for_spectrograms(audio_files, preferred_spectrogram_audio, fallback_count=2)
         spectrogram_entries: list[tuple[str, str]] = []
@@ -2175,7 +2344,7 @@ def main():
             spectrogram_entries.append((spectrogram_audio.name, spectrogram_url))
         success("Spectrogram(s) uploaded!")
 
-        # ── Cover ─────────────────────────────────────────────────────────────
+
         cover_url = AUDIO_NO_COVER_PLACEHOLDER
         local_cover_path = None
         cover_search_dir = target_path if is_folder else target_path.parent
@@ -2206,7 +2375,7 @@ def main():
             else:
                 error(f"Cover image upload failed, using {AUDIO_NO_COVER_PLACEHOLDER}")
 
-        # ── FakingTheFunk proof image ─────────────────────────────────────────
+
         fakingthefunk_url: str | None = None
         ftf_search_root = target_path if is_folder else target_path.parent
         fakingthefunk_image = find_fakingthefunk_image(ftf_search_root)
@@ -2280,7 +2449,7 @@ def main():
         if extracted_images:
             cover_local_path = extracted_images[0]
             if cover_local_path.parent != sync_dir:
-                hex_suffix = secrets.token_hex(8)  # 8 bytes (16 hex chars, 64 bits of entropy) without overly long filenames
+                hex_suffix = secrets.token_hex(8)
                 staged_cover_path = sync_dir / f"{pdf_path.stem}_cover_{hex_suffix}{cover_local_path.suffix}"
                 try:
                     shutil.copy(cover_local_path, staged_cover_path)
@@ -2347,8 +2516,8 @@ def main():
                 }
                 if cover_local_path and cover_local_path.exists():
                     try:
-                        # Use POSIX separators and a relative path; Tampermonkey fetches from http://localhost:8090/<relative_cover_path>
-                        # with HTTP_PORT configured in the settings block and sync_dir served as the web root.
+
+
                         payload["coverFile"] = cover_local_path.relative_to(sync_dir).as_posix()
                     except ValueError:
                         error(
@@ -2363,7 +2532,9 @@ def main():
                 error(f"HTTP Sync Failed: {e}")
 
     else:
-        video_for_ss = video_files[0] if video_files else None
+        _base = target_path if is_folder else None
+        _non_sample = [f for f in video_files if not _is_sample_file(f, _base)]
+        video_for_ss = (_non_sample[0] if _non_sample else video_files[0]) if video_files else None
 
         if not video_for_ss: error("No video found!"); return
 
@@ -2430,7 +2601,19 @@ def main():
             except Exception as e:
                 error(f"HTTP Sync Failed: {e}")
 
-    print(f"\n{c.BOLD}{c.GREEN}ALL DONE!{c.RESET}")
+
+    _torrent_thread.join()
+    _torrent_ok = _torrent_result[0]
+    if not _torrent_ok and CREATE_TORRENT_FILE:
+        error("Torrent creation failed!")
+
+    if START_HTTP_SERVER:
+        _server_ready_event.wait(timeout=5)
+
+    if _torrent_ok or not CREATE_TORRENT_FILE:
+        print(f"\n{c.BOLD}{c.GREEN}ALL DONE!{c.RESET}")
+    else:
+        print(f"\n{c.BOLD}{c.YELLOW}DONE (torrent creation failed — description still copied to clipboard).{c.RESET}")
     print(f"{c.DIM}When you exit, sync files & generated torrents will be deleted.{c.RESET}")
     input(f"\nPress Enter to exit...")
 
